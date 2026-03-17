@@ -157,66 +157,6 @@ def _active_hydrogen_mask(mol_with_hs):
     return keep_atom
 
 
-def _add_active_hydrogen_nodes(graph: Dict, smiles: str) -> Dict:
-    """Keep all non-hydrogen atoms and donor-attached hydrogens only."""
-    try:
-        mol = Chem.MolFromSmiles(smiles)
-        if mol is None:
-            return graph
-        mol_with_hs = Chem.AddHs(mol)
-    except Exception:
-        return graph
-
-    donor_atomic_nums = {7, 8, 16}
-    keep_atom = np.zeros(mol_with_hs.GetNumAtoms(), dtype=np.bool_)
-    for atom in mol_with_hs.GetAtoms():
-        if atom.GetAtomicNum() != 1:
-            keep_atom[atom.GetIdx()] = True
-            continue
-
-        neighbors = atom.GetNeighbors()
-        if len(neighbors) != 1:
-            continue
-        parent = neighbors[0]
-        if parent.GetAtomicNum() in donor_atomic_nums:
-            keep_atom[atom.GetIdx()] = True
-
-    if not keep_atom.any():
-        return graph
-
-    node_feat = np.asarray(graph['node_feat'])
-    if node_feat.ndim != 2 or node_feat.shape[0] != mol_with_hs.GetNumAtoms():
-        return graph
-
-    keep_idx = np.flatnonzero(keep_atom)
-    if len(keep_idx) == mol_with_hs.GetNumAtoms():
-        graph['num_nodes'] = len(keep_idx)
-        return graph
-
-    old_to_new = -np.ones(mol_with_hs.GetNumAtoms(), dtype=np.int32)
-    old_to_new[keep_idx] = np.arange(len(keep_idx))
-
-    edge_index = np.asarray(graph['edge_index'])
-    edge_feat = np.asarray(graph['edge_feat'])
-
-    if edge_index.size == 0:
-        filtered_edge_index = edge_index
-        filtered_edge_feat = edge_feat
-    else:
-        edge_mask = keep_atom[edge_index[0]] & keep_atom[edge_index[1]]
-        filtered_edge_index = edge_index[:, edge_mask]
-        filtered_edge_feat = edge_feat[edge_mask]
-        filtered_edge_index = old_to_new[filtered_edge_index]
-
-    return {
-        'edge_index': np.asarray(filtered_edge_index, dtype=np.int32),
-        'edge_feat': np.asarray(filtered_edge_feat, dtype=np.int8),
-        'node_feat': node_feat[keep_idx],
-        'node_rwpe': np.asarray(graph.get('node_rwpe', np.zeros((len(node_feat), NODE_CONTINUOUS_DIM), dtype=np.float16)))[keep_idx],
-        'num_nodes': len(keep_idx),
-    }
-
-
 def _get_centered_en(atom):
     en = _PAULING_EN.get(atom.GetAtomicNum())
     if en is None:
@@ -240,19 +180,18 @@ def _compute_rwpe(num_nodes: int, edge_index: np.ndarray, rwpe_dim: int = RWPE_D
     if num_nodes <= 0:
         return np.zeros((0, rwpe_dim), dtype=np.float16)
 
-    adjacency = np.zeros((num_nodes, num_nodes), dtype=np.float64)
+    adjacency = np.eye(num_nodes, dtype=np.float32)
     if edge_index.size > 0:
         src = edge_index[0]
         dst = edge_index[1]
         adjacency[src, dst] = 1.0
-    adjacency += np.eye(num_nodes, dtype=np.float64)
 
     degree = adjacency.sum(axis=1)
     transition = np.zeros_like(adjacency)
     nonzero_degree = degree > 0
     transition[nonzero_degree] = adjacency[nonzero_degree] / degree[nonzero_degree, None]
 
-    rwpe = np.zeros((num_nodes, rwpe_dim), dtype=np.float64)
+    rwpe = np.zeros((num_nodes, rwpe_dim), dtype=np.float32)
     power = transition.copy()
     for k in range(rwpe_dim):
         rwpe[:, k] = np.diag(power)
@@ -371,13 +310,7 @@ def bond_to_feature_vector(bond, rotatable_bond_indices: set[int] | None = None)
     return bond_feature
 
 
-def ReorderCanonicalRankAtoms(mol):
-    order = tuple(i for _, i in sorted((j, i) for i, j in enumerate(Chem.CanonicalRankAtoms(mol))))
-    mol_renum = Chem.RenumberAtoms(mol, order)
-    return mol_renum, order
-
-
-def smiles2graph(smiles_string, removeHs=True, reorder_atoms=False, sdf_mol=None):
+def smiles2graph(smiles_string, removeHs=True, sdf_mol=None):
     """
     Converts SMILES string to graph Data object
     :input: SMILES string (str)
@@ -398,19 +331,15 @@ def smiles2graph(smiles_string, removeHs=True, reorder_atoms=False, sdf_mol=None
     else:
         keep_atom = np.ones(mol.GetNumAtoms(), dtype=np.bool_)
 
-    if reorder_atoms:
-        mol, order = ReorderCanonicalRankAtoms(mol)
-        keep_atom = keep_atom[list(order)]
-
     keep_idx = np.flatnonzero(keep_atom)
     if len(keep_idx) == 0:
         edge_index = np.empty((2, 0), dtype=np.int64)
-        edge_attr = np.empty((0, 5), dtype=np.int64)
+        edge_feat = np.empty((0, 5), dtype=np.int64)
         return {
             'edge_index': edge_index,
-            'edge_feat': edge_attr,
+            'edge_feat': edge_feat,
             'node_feat': np.empty((0, 0), dtype=np.int64),
-            'node_rwpe': np.zeros((0, NODE_CONTINUOUS_DIM), dtype=np.float16),
+            'node_embd': np.zeros((0, NODE_CONTINUOUS_DIM), dtype=np.float16),
             'num_nodes': 0,
         }
 
@@ -419,16 +348,16 @@ def smiles2graph(smiles_string, removeHs=True, reorder_atoms=False, sdf_mol=None
     rotatable_bond_indices = _rotatable_bond_indices(mol)
 
     # atoms
-    atom_features_list = []
+    atom_feat_list = []
     node_en_list = []
     node_gc_list = []
     for atom in mol.GetAtoms():
         if keep_atom[atom.GetIdx()]:
-            atom_features_list.append(atom_to_feature_vector(atom))
+            atom_feat_list.append(atom_to_feature_vector(atom))
             node_en_list.append(_get_centered_en(atom))
             node_gc_list.append(_get_gasteiger_charge(atom))
     node_coords = _extract_3d_coords(mol, sdf_mol, keep_atom)
-    x = np.array(atom_features_list, dtype = np.int64)
+    x = np.array(atom_feat_list, dtype = np.int64)
     node_en = np.array(node_en_list, dtype=np.float16).reshape(-1, 1)
     node_gc = np.array(node_gc_list, dtype=np.float16).reshape(-1, 1)
     node_coords = np.asarray(node_coords, dtype=np.float16)
@@ -437,7 +366,7 @@ def smiles2graph(smiles_string, removeHs=True, reorder_atoms=False, sdf_mol=None
     num_bond_features = 5  # bond type, bond stereo, is_conjugated, is_rotable, ring_size
     if len(mol.GetBonds()) > 0: # mol has bonds
         edges_list = []
-        edge_features_list = []
+        edge_feat_list = []
         for bond in mol.GetBonds():
             i = bond.GetBeginAtomIdx()
             j = bond.GetEndAtomIdx()
@@ -446,33 +375,32 @@ def smiles2graph(smiles_string, removeHs=True, reorder_atoms=False, sdf_mol=None
 
             edge_feature = bond_to_feature_vector(bond, rotatable_bond_indices)
 
+            ni, nj = old_to_new[i], old_to_new[j]
             # add edges in both directions
-            edges_list.append((i, j))
-            edge_features_list.append(edge_feature)
-            edges_list.append((j, i))
-            edge_features_list.append(edge_feature)
+            edges_list.append((ni, nj))
+            edge_feat_list.append(edge_feature)
+            edges_list.append((nj, ni))
+            edge_feat_list.append(edge_feature)
 
         if len(edges_list) == 0:
             edge_index = np.empty((2, 0), dtype=np.int64)
-            edge_attr = np.empty((0, num_bond_features), dtype=np.int64)
+            edge_feat = np.empty((0, num_bond_features), dtype=np.int64)
         else:
             # data.edge_index: Graph connectivity in COO format with shape [2, num_edges]
             edge_index = np.array(edges_list, dtype = np.int64).T
 
-            # data.edge_attr: Edge feature matrix with shape [num_edges, num_edge_features]
-            edge_attr = np.array(edge_features_list, dtype = np.int64)
+            # data.edge_feat: Edge feature matrix with shape [num_edges, num_edge_features]
+            edge_feat = np.array(edge_feat_list, dtype = np.int64)
 
     else:   # mol has no bonds
         edge_index = np.empty((2, 0), dtype = np.int64)
-        edge_attr = np.empty((0, num_bond_features), dtype = np.int64)
+        edge_feat = np.empty((0, num_bond_features), dtype = np.int64)
 
     graph = dict()
-    if edge_index.size != 0:
-        edge_index = old_to_new[edge_index]
     graph['edge_index'] = edge_index
-    graph['edge_feat'] = edge_attr
+    graph['edge_feat'] = edge_feat
     graph['node_feat'] = x
-    graph['node_rwpe'] = np.concatenate(
+    graph['node_embd'] = np.concatenate(
         [_compute_rwpe(len(x), edge_index, RWPE_DIM), node_en, node_gc, node_coords], axis=1
     )
     graph['num_nodes'] = len(x)
@@ -484,26 +412,26 @@ def _concat_graph_blocks(graphs: list):
     """Concatenate node/edge arrays and build boundary pointers."""
     node_ptr = [0]
     edge_ptr = [0]
-    node_features = []
-    node_rwpe_embeddings = []
-    edge_features = []
+    node_feat_list = []
+    node_embd_list = []
+    edge_feat_list = []
     edge_indices = []
 
     node_feat_dim = 0
-    node_rwpe_dim = 0
+    node_embd_dim = 0
     edge_feat_dim = 0
     for graph in graphs:
         node_feat = np.asarray(graph['node_feat'])
-        node_rwpe = np.asarray(graph.get('node_rwpe', np.zeros((node_feat.shape[0], NODE_CONTINUOUS_DIM), dtype=np.float16)))
+        node_embd = np.asarray(graph.get('node_embd', np.zeros((node_feat.shape[0], NODE_CONTINUOUS_DIM), dtype=np.float16)))
         edge_feat = np.asarray(graph['edge_feat'])
 
         if node_feat.size > 0 and node_feat.ndim == 2:
             node_feat_dim = node_feat.shape[1]
-        if node_rwpe.size > 0 and node_rwpe.ndim == 2:
-            node_rwpe_dim = node_rwpe.shape[1]
+        if node_embd.size > 0 and node_embd.ndim == 2:
+            node_embd_dim = node_embd.shape[1]
         if edge_feat.size > 0 and edge_feat.ndim == 2:
             edge_feat_dim = edge_feat.shape[1]
-        if node_feat_dim > 0 and node_rwpe_dim > 0 and edge_feat_dim > 0:
+        if node_feat_dim > 0 and node_embd_dim > 0 and edge_feat_dim > 0:
             break
 
     if node_feat_dim == 0:
@@ -512,25 +440,25 @@ def _concat_graph_blocks(graphs: list):
             if edge_feat.size > 0 and edge_feat.ndim == 2:
                 edge_feat_dim = edge_feat.shape[1]
                 break
-    if node_rwpe_dim == 0:
-        node_rwpe_dim = NODE_CONTINUOUS_DIM
+    if node_embd_dim == 0:
+        node_embd_dim = NODE_CONTINUOUS_DIM
 
     for graph in graphs:
         node_feat = np.asarray(graph['node_feat'])
-        node_rwpe = np.asarray(graph.get('node_rwpe', np.zeros((node_feat.shape[0], node_rwpe_dim), dtype=np.float16)))
+        node_embd = np.asarray(graph.get('node_embd', np.zeros((node_feat.shape[0], node_embd_dim), dtype=np.float16)))
         edge_feat = np.asarray(graph['edge_feat'])
         edge_index = np.asarray(graph['edge_index'])
 
         if node_feat.size == 0:
             node_feat = np.zeros((0, node_feat_dim), dtype=np.int8)
-        if node_rwpe.size == 0:
-            node_rwpe = np.zeros((0, node_rwpe_dim), dtype=np.float16)
+        if node_embd.size == 0:
+            node_embd = np.zeros((0, node_embd_dim), dtype=np.float16)
         if edge_feat.size == 0:
             edge_feat = np.zeros((0, edge_feat_dim), dtype=np.int8)
 
-        node_features.append(node_feat)
-        node_rwpe_embeddings.append(node_rwpe)
-        edge_features.append(edge_feat)
+        node_feat_list.append(node_feat)
+        node_embd_list.append(node_embd)
+        edge_feat_list.append(edge_feat)
         num_nodes = node_feat.shape[0]
         num_edges = edge_index.shape[1] if edge_index.size else 0
 
@@ -542,20 +470,20 @@ def _concat_graph_blocks(graphs: list):
         node_ptr.append(node_ptr[-1] + num_nodes)
         edge_ptr.append(edge_ptr[-1] + num_edges)
 
-    if node_features:
-        node_features = np.concatenate(node_features, axis=0)
+    if node_feat_list:
+        node_feat_arr = np.concatenate(node_feat_list, axis=0)
     else:
-        node_features = np.zeros((0, 0))
+        node_feat_arr = np.zeros((0, 0))
 
-    if edge_features:
-        edge_features = np.concatenate(edge_features, axis=0)
+    if edge_feat_list:
+        edge_feat_arr = np.concatenate(edge_feat_list, axis=0)
     else:
-        edge_features = np.zeros((0, 0))
+        edge_feat_arr = np.zeros((0, 0))
 
-    if node_rwpe_embeddings:
-        node_rwpe_embeddings = np.concatenate(node_rwpe_embeddings, axis=0)
+    if node_embd_list:
+        node_embd_arr = np.concatenate(node_embd_list, axis=0)
     else:
-        node_rwpe_embeddings = np.zeros((0, node_rwpe_dim), dtype=np.float16)
+        node_embd_arr = np.zeros((0, node_embd_dim), dtype=np.float16)
 
     if edge_indices:
         edge_index = np.concatenate(edge_indices, axis=1) if edge_indices else np.zeros((2, 0), dtype=np.int32)
@@ -563,9 +491,9 @@ def _concat_graph_blocks(graphs: list):
         edge_index = np.zeros((2, 0), dtype=np.int32)
 
     return (
-        np.asarray(node_features, dtype=np.int8),
-        np.asarray(node_rwpe_embeddings, dtype=np.float16),
-        np.asarray(edge_features, dtype=np.int8),
+        np.asarray(node_feat_arr, dtype=np.int8),
+        np.asarray(node_embd_arr, dtype=np.float16),
+        np.asarray(edge_feat_arr, dtype=np.int8),
         np.asarray(edge_index, dtype=np.int8),
         np.asarray(node_ptr, dtype=np.int32),
         np.asarray(edge_ptr, dtype=np.int32),
@@ -574,14 +502,14 @@ def _concat_graph_blocks(graphs: list):
 
 def _save_hdf5(path: str, graphs: list, labels: np.ndarray):
     """Persist concatenated graph tensors and labels in HDF5 format."""
-    node_features, node_rwpe, edge_features, edge_index, node_ptr, edge_ptr = _concat_graph_blocks(graphs)
+    node_feat, node_embd, edge_feat, edge_index, node_ptr, edge_ptr = _concat_graph_blocks(graphs)
 
     os.makedirs(osp.dirname(path), exist_ok=True)
     with h5py.File(path, 'w') as f:
         f.create_dataset('labels', data=np.asarray(labels))
-        f.create_dataset('node_features', data=node_features)
-        f.create_dataset('node_rwpe', data=node_rwpe)
-        f.create_dataset('edge_features', data=edge_features)
+        f.create_dataset('node_feat', data=node_feat)
+        f.create_dataset('node_embd', data=node_embd)
+        f.create_dataset('edge_feat', data=edge_feat)
         f.create_dataset('edge_index', data=edge_index)
         f.create_dataset('node_ptr', data=node_ptr)
         f.create_dataset('edge_ptr', data=edge_ptr)
@@ -591,14 +519,14 @@ def _load_hdf5(path: str):
     """Load concatenated graph arrays and boundary pointers from HDF5."""
     with h5py.File(path, 'r') as f:
         labels = np.asarray(f['labels'][()], dtype=np.float32)
-        node_features = np.asarray(f['node_features'][()], dtype=np.int32)
-        node_rwpe = np.asarray(f['node_rwpe'][()], dtype=np.float32)
-        edge_features = np.asarray(f['edge_features'][()], dtype=np.int32)
+        node_feat = np.asarray(f['node_feat'][()], dtype=np.int32)
+        node_embd = np.asarray(f['node_embd'][()], dtype=np.float32)
+        edge_feat = np.asarray(f['edge_feat'][()], dtype=np.int32)
         edge_index = np.asarray(f['edge_index'][()], dtype=np.int32)
         node_ptr = np.asarray(f['node_ptr'][()], dtype=np.int32)
         edge_ptr = np.asarray(f['edge_ptr'][()], dtype=np.int32)
 
-    return labels, node_features, node_rwpe, edge_features, edge_index, node_ptr, edge_ptr
+    return labels, node_feat, node_embd, edge_feat, edge_index, node_ptr, edge_ptr
 
 
 class PCQM4Mv2Dataset(object):
@@ -674,9 +602,9 @@ class PCQM4Mv2Dataset(object):
             # if pre-processed file already exists
             (
                 self.labels,
-                self.node_features,
-                self.node_rwpe,
-                self.edge_features,
+                self.node_feat,
+                self.node_embd,
+                self.edge_feat,
                 self.edge_index,
                 self.node_ptr,
                 self.edge_ptr,
@@ -721,7 +649,7 @@ class PCQM4Mv2Dataset(object):
                     if "'NoneType' object has no attribute 'GetAtoms'" in str(exc):
                         graph = {
                             'node_feat': np.zeros((0, 0), dtype=np.int8),
-                            'node_rwpe': np.zeros((0, NODE_CONTINUOUS_DIM), dtype=np.float16),
+                            'node_embd': np.zeros((0, NODE_CONTINUOUS_DIM), dtype=np.float16),
                             'edge_feat': np.zeros((0, 0), dtype=np.int8),
                             'edge_index': np.zeros((2, 0), dtype=np.int32),
                             'num_nodes': 0,
@@ -733,7 +661,7 @@ class PCQM4Mv2Dataset(object):
                     if graph is None:
                         graph = {
                             'node_feat': np.zeros((0, 0), dtype=np.int8),
-                            'node_rwpe': np.zeros((0, NODE_CONTINUOUS_DIM), dtype=np.float16),
+                            'node_embd': np.zeros((0, NODE_CONTINUOUS_DIM), dtype=np.float16),
                             'edge_feat': np.zeros((0, 0), dtype=np.int8),
                             'edge_index': np.zeros((2, 0), dtype=np.int32),
                             'num_nodes': 0,
@@ -760,9 +688,9 @@ class PCQM4Mv2Dataset(object):
             _save_hdf5(pre_processed_file_path, self.graphs, self.labels)
             (
                 self.labels,
-                self.node_features,
-                self.node_rwpe,
-                self.edge_features,
+                self.node_feat,
+                self.node_embd,
+                self.edge_feat,
                 self.edge_index,
                 self.node_ptr,
                 self.edge_ptr,
@@ -792,9 +720,9 @@ class PCQM4Mv2Dataset(object):
 
                 return (
                     {
-                        'node_feat': self.node_features[node_start:node_end],
-                        'node_rwpe': self.node_rwpe[node_start:node_end],
-                        'edge_feat': self.edge_features[edge_start:edge_end],
+                        'node_feat': self.node_feat[node_start:node_end],
+                        'node_embd': self.node_embd[node_start:node_end],
+                        'edge_feat': self.edge_feat[edge_start:edge_end],
                         'edge_index': self.edge_index[:, edge_start:edge_end],
                         'num_nodes': node_end - node_start,
                         'num_edges': edge_end - edge_start,
