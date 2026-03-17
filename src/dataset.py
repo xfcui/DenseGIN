@@ -162,7 +162,7 @@ class PCQMDataset:
             self.split_indices = _load_split_indices(split_file, split, self.num_graphs)
 
     def close(self) -> None:
-        if self.h5_file is not None:
+        if getattr(self, "h5_file", None) is not None:
             self.h5_file.close()
 
     def __del__(self) -> None:
