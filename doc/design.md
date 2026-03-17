@@ -9,7 +9,8 @@ dataset (~3.8 M molecules, target: HOMO–LUMO gap in eV, metric: MAE).
 
 Each molecule is converted from a SMILES string into a directed graph by
 `smiles2graph` in `src/dataset.py`. The graph carries two kinds of node
-features (discrete and continuous) and one set of edge features (discrete).
+features (discrete and continuous), one set of direct-bond edge features, and
+three additional hop-aware edge sets (2-hop, 3-hop, and 4-hop).
 
 ### Hydrogen Handling
 
@@ -107,6 +108,31 @@ ring constraint.
 
 All edges are stored in both directions (i→j and j→i) with identical features.
 
+### K-hop edge features (`edge_feat_2hop`, `edge_feat_3hop`, `edge_feat_4hop`)
+
+In addition to the direct-bond edges, `smiles2graph` now adds directed 2-hop, 3-hop, and
+4-hop edge streams:
+
+| Stream | Edge index | Edge feature shape | Feature meaning |
+|---|---|---|---|
+| `2-hop` | `edge_index_2hop` | `(num_2hop_edges, 2)` | Counts of acyclic paths at step lengths 1 and 2 |
+| `3-hop` | `edge_index_3hop` | `(num_3hop_edges, 3)` | Counts of acyclic paths at step lengths 1, 2, and 3 |
+| `4-hop` | `edge_index_4hop` | `(num_4hop_edges, 4)` | Counts of acyclic paths at step lengths 1, 2, 3, and 4 |
+
+For each pair `(u, v)`, a k-hop edge exists whenever at least one acyclic path of exactly
+that length exists. Pairs can therefore appear in multiple hop sets (for example, both 2-hop
+and 3-hop) and may also be direct bonds (count_1=1).
+
+Path-count vocabulary:
+
+`possible_path_count_list = [0, 1, 2, 'misc']`  
+Counts above `2` map to `misc`.
+
+The feature order is:
+
+- 2-hop: `[count_1, count_2]`
+- 3-hop: `[count_1, count_2, count_3]`
+- 4-hop: `[count_1, count_2, count_3, count_4]`
 ---
 
 ## Storage
@@ -116,16 +142,26 @@ flat concatenated arrays with boundary pointers:
 
 | Dataset | dtype | Shape |
 |---------|-------|-------|
-| `node_features` | int8 | (total_nodes, 10) |
-| `node_rwpe` | float16 | (total_nodes, 17) |
-| `edge_features` | int8 | (total_edges, 5) |
+| `node_feat` | int8 | (total_nodes, 10) |
+| `node_embd` | float16 | (total_nodes, 17) |
+| `edge_feat` | int8 | (total_edges, 5) |
 | `edge_index` | int8 | (2, total_edges) |
+| `edge_index_2hop` | int8 | (2, total_2hop_edges) |
+| `edge_feat_2hop` | int8 | (total_2hop_edges, 2) |
+| `edge_ptr_2hop` | int32 | (num_molecules + 1,) |
+| `edge_index_3hop` | int8 | (2, total_3hop_edges) |
+| `edge_feat_3hop` | int8 | (total_3hop_edges, 3) |
+| `edge_ptr_3hop` | int32 | (num_molecules + 1,) |
+| `edge_index_4hop` | int8 | (2, total_4hop_edges) |
+| `edge_feat_4hop` | int8 | (total_4hop_edges, 4) |
+| `edge_ptr_4hop` | int32 | (num_molecules + 1,) |
 | `node_ptr` | int32 | (num_molecules + 1,) |
 | `edge_ptr` | int32 | (num_molecules + 1,) |
 | `labels` | float32 | (num_molecules,) |
 
 Molecule `i` occupies `node_ptr[i]:node_ptr[i+1]` in node arrays and
-`edge_ptr[i]:edge_ptr[i+1]` in edge arrays.
+`edge_ptr[i]:edge_ptr[i+1]` in direct-bond edge arrays, with analogous 2-hop/3-hop/4-hop
+bounds via `edge_ptr_2hop`, `edge_ptr_3hop`, and `edge_ptr_4hop`.
 
 ---
 

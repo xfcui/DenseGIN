@@ -48,6 +48,7 @@ allowable_features = {
     ], 
     'possible_is_conjugated_list': [False, True],
     'possible_is_rotable_list': [False, True],
+    'possible_path_count_list': [0, 1, 2, 'misc'],
     'possible_ring_size_list': [3, 4, 5, 6, 7, 8, 'misc'],
 }
 
@@ -248,6 +249,137 @@ def _rotatable_bond_indices(mol) -> set[int]:
     return bond_indices
 
 
+def _compute_khop_edges(num_nodes, edge_index):
+    """Return 2-hop, 3-hop, and 4-hop directed edge lists with acyclic path counts."""
+    empty_index = np.empty((2, 0), dtype=np.uint8)
+    empty_2hop_feat = np.empty((0, 2), dtype=np.uint8)
+    empty_3hop_feat = np.empty((0, 3), dtype=np.uint8)
+    empty_4hop_feat = np.empty((0, 4), dtype=np.uint8)
+
+    if num_nodes <= 1:
+        return (
+            empty_index,
+            empty_2hop_feat,
+            empty_index,
+            empty_3hop_feat,
+            empty_index,
+            empty_4hop_feat,
+        )
+
+    adjacency = [set() for _ in range(num_nodes)]
+    if edge_index.size > 0:
+        for src, dst in zip(edge_index[0], edge_index[1]):
+            adjacency[int(src)].add(int(dst))
+
+    count_1 = {}
+    for u in range(num_nodes):
+        for v in adjacency[u]:
+            if v > u:
+                count_1[(u, v)] = 1
+
+    count_2 = {}
+    for u in range(num_nodes):
+        for n1 in adjacency[u]:
+            for v in adjacency[n1]:
+                if v == u or v <= u:
+                    continue
+                count_2[(u, v)] = count_2.get((u, v), 0) + 1
+
+    count_3 = {}
+    for u in range(num_nodes):
+        for n1 in adjacency[u]:
+            for n2 in adjacency[n1]:
+                if n2 == u:
+                    continue
+                for v in adjacency[n2]:
+                    if v in (u, n1, n2) or v <= u:
+                        continue
+                    count_3[(u, v)] = count_3.get((u, v), 0) + 1
+
+    count_4 = {}
+    for u in range(num_nodes):
+        for n1 in adjacency[u]:
+            for n2 in adjacency[n1]:
+                if n2 in (u, n1):
+                    continue
+                for n3 in adjacency[n2]:
+                    if n3 in (u, n1, n2):
+                        continue
+                    for v in adjacency[n3]:
+                        if v in (u, n1, n2, n3) or v <= u:
+                            continue
+                        count_4[(u, v)] = count_4.get((u, v), 0) + 1
+
+    edge_index_2hop = []
+    edge_feat_2hop = []
+    for (u, v), c2 in count_2.items():
+        if c2 <= 0:
+            continue
+        c1 = safe_index(allowable_features['possible_path_count_list'], count_1.get((u, v), 0))
+        c2_idx = safe_index(allowable_features['possible_path_count_list'], c2)
+        edge_index_2hop.append((u, v))
+        edge_feat_2hop.append([c1, c2_idx])
+        edge_index_2hop.append((v, u))
+        edge_feat_2hop.append([c1, c2_idx])
+
+    edge_index_3hop = []
+    edge_feat_3hop = []
+    for (u, v), c3 in count_3.items():
+        if c3 <= 0:
+            continue
+        c1 = safe_index(allowable_features['possible_path_count_list'], count_1.get((u, v), 0))
+        c2_idx = safe_index(allowable_features['possible_path_count_list'], count_2.get((u, v), 0))
+        c3_idx = safe_index(allowable_features['possible_path_count_list'], c3)
+        edge_index_3hop.append((u, v))
+        edge_feat_3hop.append([c1, c2_idx, c3_idx])
+        edge_index_3hop.append((v, u))
+        edge_feat_3hop.append([c1, c2_idx, c3_idx])
+
+    edge_index_4hop = []
+    edge_feat_4hop = []
+    for (u, v), c4 in count_4.items():
+        if c4 <= 0:
+            continue
+        c1 = safe_index(allowable_features['possible_path_count_list'], count_1.get((u, v), 0))
+        c2_idx = safe_index(allowable_features['possible_path_count_list'], count_2.get((u, v), 0))
+        c3_idx = safe_index(allowable_features['possible_path_count_list'], count_3.get((u, v), 0))
+        c4_idx = safe_index(allowable_features['possible_path_count_list'], c4)
+        edge_index_4hop.append((u, v))
+        edge_feat_4hop.append([c1, c2_idx, c3_idx, c4_idx])
+        edge_index_4hop.append((v, u))
+        edge_feat_4hop.append([c1, c2_idx, c3_idx, c4_idx])
+
+    if len(edge_index_2hop) == 0:
+        edge_index_2hop = empty_index
+        edge_feat_2hop = empty_2hop_feat
+    else:
+        edge_index_2hop = np.asarray(edge_index_2hop, dtype=np.uint8).T
+        edge_feat_2hop = np.asarray(edge_feat_2hop, dtype=np.uint8)
+
+    if len(edge_index_3hop) == 0:
+        edge_index_3hop = empty_index
+        edge_feat_3hop = empty_3hop_feat
+    else:
+        edge_index_3hop = np.asarray(edge_index_3hop, dtype=np.uint8).T
+        edge_feat_3hop = np.asarray(edge_feat_3hop, dtype=np.uint8)
+
+    if len(edge_index_4hop) == 0:
+        edge_index_4hop = empty_index
+        edge_feat_4hop = empty_4hop_feat
+    else:
+        edge_index_4hop = np.asarray(edge_index_4hop, dtype=np.uint8).T
+        edge_feat_4hop = np.asarray(edge_feat_4hop, dtype=np.uint8)
+
+    return (
+        edge_index_2hop,
+        edge_feat_2hop,
+        edge_index_3hop,
+        edge_feat_3hop,
+        edge_index_4hop,
+        edge_feat_4hop,
+    )
+
+
 def _is_rotable_bond(bond, rotatable_bond_indices: set[int] | None = None):
     """Return whether an RDKit bond is rotatable."""
     if rotatable_bond_indices is not None:
@@ -334,6 +466,12 @@ def smiles2graph(smiles_string, removeHs=True, sdf_mol=None):
         return {
             'edge_index': edge_index,
             'edge_feat': edge_feat,
+            'edge_index_2hop': np.empty((2, 0), dtype=np.int64),
+            'edge_feat_2hop': np.empty((0, 2), dtype=np.uint8),
+            'edge_index_3hop': np.empty((2, 0), dtype=np.int64),
+            'edge_feat_3hop': np.empty((0, 3), dtype=np.uint8),
+            'edge_index_4hop': np.empty((2, 0), dtype=np.int64),
+            'edge_feat_4hop': np.empty((0, 4), dtype=np.uint8),
             'node_feat': np.empty((0, 0), dtype=np.int64),
             'node_embd': np.zeros((0, NODE_CONTINUOUS_DIM), dtype=np.float16),
             'num_nodes': 0,
@@ -392,9 +530,18 @@ def smiles2graph(smiles_string, removeHs=True, sdf_mol=None):
         edge_index = np.empty((2, 0), dtype = np.int64)
         edge_feat = np.empty((0, num_bond_features), dtype = np.int64)
 
+    edge_index_2hop, edge_feat_2hop, edge_index_3hop, edge_feat_3hop, edge_index_4hop, edge_feat_4hop = \
+        _compute_khop_edges(len(x), edge_index)
+
     graph = dict()
     graph['edge_index'] = edge_index
     graph['edge_feat'] = edge_feat
+    graph['edge_index_2hop'] = edge_index_2hop
+    graph['edge_feat_2hop'] = edge_feat_2hop
+    graph['edge_index_3hop'] = edge_index_3hop
+    graph['edge_feat_3hop'] = edge_feat_3hop
+    graph['edge_index_4hop'] = edge_index_4hop
+    graph['edge_feat_4hop'] = edge_feat_4hop
     graph['node_feat'] = x
     graph['node_embd'] = np.concatenate(
         [_compute_rwpe(len(x), edge_index, RWPE_DIM), node_en, node_gc, node_coords], axis=1
@@ -408,14 +555,26 @@ def _concat_graph_blocks(graphs: list):
     """Concatenate node/edge arrays and build boundary pointers."""
     node_ptr = [0]
     edge_ptr = [0]
+    edge_ptr_2hop = [0]
+    edge_ptr_3hop = [0]
+    edge_ptr_4hop = [0]
     node_feat_list = []
     node_embd_list = []
     edge_feat_list = []
     edge_indices = []
+    edge_indices_2hop = []
+    edge_indices_3hop = []
+    edge_indices_4hop = []
+    edge_feat_2hop_list = []
+    edge_feat_3hop_list = []
+    edge_feat_4hop_list = []
 
     node_feat_dim = 0
     node_embd_dim = 0
     edge_feat_dim = 0
+    edge_feat_2hop_dim = 0
+    edge_feat_3hop_dim = 0
+    edge_feat_4hop_dim = 0
     for graph in graphs:
         if node_feat_dim == 0:
             node_feat = np.asarray(graph['node_feat'])
@@ -429,17 +588,41 @@ def _concat_graph_blocks(graphs: list):
             edge_feat = np.asarray(graph['edge_feat'])
             if edge_feat.size > 0 and edge_feat.ndim == 2:
                 edge_feat_dim = edge_feat.shape[1]
+    if edge_feat_2hop_dim == 0:
+        edge_feat_2hop = np.asarray(graph['edge_feat_2hop'])
+        if edge_feat_2hop.size > 0 and edge_feat_2hop.ndim == 2:
+            edge_feat_2hop_dim = edge_feat_2hop.shape[1]
+    if edge_feat_3hop_dim == 0:
+        edge_feat_3hop = np.asarray(graph['edge_feat_3hop'])
+        if edge_feat_3hop.size > 0 and edge_feat_3hop.ndim == 2:
+            edge_feat_3hop_dim = edge_feat_3hop.shape[1]
+    if edge_feat_4hop_dim == 0:
+        edge_feat_4hop = np.asarray(graph['edge_feat_4hop'])
+        if edge_feat_4hop.size > 0 and edge_feat_4hop.ndim == 2:
+            edge_feat_4hop_dim = edge_feat_4hop.shape[1]
         if node_feat_dim > 0 and node_embd_dim > 0 and edge_feat_dim > 0:
             break
 
     if node_embd_dim == 0:
         node_embd_dim = NODE_CONTINUOUS_DIM
+    if edge_feat_2hop_dim == 0:
+        edge_feat_2hop_dim = 2
+    if edge_feat_3hop_dim == 0:
+        edge_feat_3hop_dim = 3
+    if edge_feat_4hop_dim == 0:
+        edge_feat_4hop_dim = 4
 
     for graph in graphs:
         node_feat = np.asarray(graph['node_feat'])
         node_embd = np.asarray(graph.get('node_embd', np.zeros((node_feat.shape[0], node_embd_dim), dtype=np.float16)))
         edge_feat = np.asarray(graph['edge_feat'])
         edge_index = np.asarray(graph['edge_index'])
+        edge_index_2hop = np.asarray(graph['edge_index_2hop'])
+        edge_feat_2hop = np.asarray(graph['edge_feat_2hop'])
+        edge_index_3hop = np.asarray(graph['edge_index_3hop'])
+        edge_feat_3hop = np.asarray(graph['edge_feat_3hop'])
+        edge_index_4hop = np.asarray(graph['edge_index_4hop'])
+        edge_feat_4hop = np.asarray(graph['edge_feat_4hop'])
 
         if node_feat.size == 0:
             node_feat = np.zeros((0, node_feat_dim), dtype=np.uint8)
@@ -447,20 +630,47 @@ def _concat_graph_blocks(graphs: list):
             node_embd = np.zeros((0, node_embd_dim), dtype=np.float16)
         if edge_feat.size == 0:
             edge_feat = np.zeros((0, edge_feat_dim), dtype=np.uint8)
+        if edge_feat_2hop.size == 0:
+            edge_feat_2hop = np.zeros((0, edge_feat_2hop_dim), dtype=np.uint8)
+        if edge_feat_3hop.size == 0:
+            edge_feat_3hop = np.zeros((0, edge_feat_3hop_dim), dtype=np.uint8)
+        if edge_feat_4hop.size == 0:
+            edge_feat_4hop = np.zeros((0, edge_feat_4hop_dim), dtype=np.uint8)
 
         node_feat_list.append(node_feat)
         node_embd_list.append(node_embd)
         edge_feat_list.append(edge_feat)
+        edge_feat_2hop_list.append(edge_feat_2hop)
+        edge_feat_3hop_list.append(edge_feat_3hop)
+        edge_feat_4hop_list.append(edge_feat_4hop)
         num_nodes = node_feat.shape[0]
         num_edges = edge_index.shape[1] if edge_index.size else 0
+        num_edges_2hop = edge_index_2hop.shape[1] if edge_index_2hop.size else 0
+        num_edges_3hop = edge_index_3hop.shape[1] if edge_index_3hop.size else 0
+        num_edges_4hop = edge_index_4hop.shape[1] if edge_index_4hop.size else 0
 
         if num_edges > 0:
             edge_indices.append(np.asarray(edge_index))
         else:
             edge_indices.append(np.zeros((2, 0), dtype=np.int32))
+        if num_edges_2hop > 0:
+            edge_indices_2hop.append(np.asarray(edge_index_2hop))
+        else:
+            edge_indices_2hop.append(np.zeros((2, 0), dtype=np.int32))
+        if num_edges_3hop > 0:
+            edge_indices_3hop.append(np.asarray(edge_index_3hop))
+        else:
+            edge_indices_3hop.append(np.zeros((2, 0), dtype=np.int32))
+        if num_edges_4hop > 0:
+            edge_indices_4hop.append(np.asarray(edge_index_4hop))
+        else:
+            edge_indices_4hop.append(np.zeros((2, 0), dtype=np.int32))
 
         node_ptr.append(node_ptr[-1] + num_nodes)
         edge_ptr.append(edge_ptr[-1] + num_edges)
+        edge_ptr_2hop.append(edge_ptr_2hop[-1] + num_edges_2hop)
+        edge_ptr_3hop.append(edge_ptr_3hop[-1] + num_edges_3hop)
+        edge_ptr_4hop.append(edge_ptr_4hop[-1] + num_edges_4hop)
 
     if node_feat_list:
         node_feat_arr = np.concatenate(node_feat_list, axis=0)
@@ -482,6 +692,32 @@ def _concat_graph_blocks(graphs: list):
     else:
         edge_index = np.zeros((2, 0), dtype=np.int32)
 
+    if edge_feat_2hop_list:
+        edge_feat_2hop_arr = np.concatenate(edge_feat_2hop_list, axis=0)
+    else:
+        edge_feat_2hop_arr = np.zeros((0, edge_feat_2hop_dim), dtype=np.uint8)
+    if edge_feat_3hop_list:
+        edge_feat_3hop_arr = np.concatenate(edge_feat_3hop_list, axis=0)
+    else:
+        edge_feat_3hop_arr = np.zeros((0, edge_feat_3hop_dim), dtype=np.uint8)
+    if edge_feat_4hop_list:
+        edge_feat_4hop_arr = np.concatenate(edge_feat_4hop_list, axis=0)
+    else:
+        edge_feat_4hop_arr = np.zeros((0, edge_feat_4hop_dim), dtype=np.uint8)
+
+    if edge_indices_2hop:
+        edge_index_2hop = np.concatenate(edge_indices_2hop, axis=1) if edge_indices_2hop else np.zeros((2, 0), dtype=np.int32)
+    else:
+        edge_index_2hop = np.zeros((2, 0), dtype=np.int32)
+    if edge_indices_3hop:
+        edge_index_3hop = np.concatenate(edge_indices_3hop, axis=1) if edge_indices_3hop else np.zeros((2, 0), dtype=np.int32)
+    else:
+        edge_index_3hop = np.zeros((2, 0), dtype=np.int32)
+    if edge_indices_4hop:
+        edge_index_4hop = np.concatenate(edge_indices_4hop, axis=1) if edge_indices_4hop else np.zeros((2, 0), dtype=np.int32)
+    else:
+        edge_index_4hop = np.zeros((2, 0), dtype=np.int32)
+
     return (
         np.asarray(node_feat_arr, dtype=np.uint8),
         np.asarray(node_embd_arr, dtype=np.float16),
@@ -489,12 +725,41 @@ def _concat_graph_blocks(graphs: list):
         np.asarray(edge_index, dtype=np.uint8),
         np.asarray(node_ptr, dtype=np.int32),
         np.asarray(edge_ptr, dtype=np.int32),
+        np.asarray(edge_index_2hop, dtype=np.uint8),
+        np.asarray(edge_feat_2hop_arr, dtype=np.uint8),
+        np.asarray(edge_ptr_2hop, dtype=np.int32),
+        np.asarray(edge_index_3hop, dtype=np.uint8),
+        np.asarray(edge_feat_3hop_arr, dtype=np.uint8),
+        np.asarray(edge_ptr_3hop, dtype=np.int32),
+        np.asarray(edge_index_4hop, dtype=np.uint8),
+        np.asarray(edge_feat_4hop_arr, dtype=np.uint8),
+        np.asarray(edge_ptr_4hop, dtype=np.int32),
     )
 
 
 def _save_hdf5(path: str, graphs: list, labels: np.ndarray):
-    """Persist concatenated graph tensors and labels in HDF5 format."""
-    node_feat, node_embd, edge_feat, edge_index, node_ptr, edge_ptr = _concat_graph_blocks(graphs)
+    """Persist concatenated graph tensors and labels in HDF5 format.
+
+    Rule: save compact (uint8/float16, *_ptr as int32); load standard (int32/float32).
+    Arrays from _concat_graph_blocks already carry the correct compact dtypes.
+    """
+    (
+        node_feat,
+        node_embd,
+        edge_feat,
+        edge_index,
+        node_ptr,
+        edge_ptr,
+        edge_index_2hop,
+        edge_feat_2hop,
+        edge_ptr_2hop,
+        edge_index_3hop,
+        edge_feat_3hop,
+        edge_ptr_3hop,
+        edge_index_4hop,
+        edge_feat_4hop,
+        edge_ptr_4hop,
+    ) = _concat_graph_blocks(graphs)
 
     os.makedirs(osp.dirname(path), exist_ok=True)
     with h5py.File(path, 'w') as f:
@@ -503,22 +768,60 @@ def _save_hdf5(path: str, graphs: list, labels: np.ndarray):
         f.create_dataset('node_embd', data=node_embd)
         f.create_dataset('edge_feat', data=edge_feat)
         f.create_dataset('edge_index', data=edge_index)
+        f.create_dataset('edge_index_2hop', data=edge_index_2hop)
+        f.create_dataset('edge_feat_2hop', data=edge_feat_2hop)
+        f.create_dataset('edge_ptr_2hop', data=edge_ptr_2hop)
+        f.create_dataset('edge_index_3hop', data=edge_index_3hop)
+        f.create_dataset('edge_feat_3hop', data=edge_feat_3hop)
+        f.create_dataset('edge_ptr_3hop', data=edge_ptr_3hop)
+        f.create_dataset('edge_index_4hop', data=edge_index_4hop)
+        f.create_dataset('edge_feat_4hop', data=edge_feat_4hop)
+        f.create_dataset('edge_ptr_4hop', data=edge_ptr_4hop)
         f.create_dataset('node_ptr', data=node_ptr)
         f.create_dataset('edge_ptr', data=edge_ptr)
 
 
 def _load_hdf5(path: str):
-    """Load concatenated graph arrays and boundary pointers from HDF5."""
+    """Load concatenated graph arrays and boundary pointers from HDF5.
+
+    Rule: save compact (uint8/float16, *_ptr as int32); load standard (int32/float32).
+    """
     with h5py.File(path, 'r') as f:
         labels = np.asarray(f['labels'][()], dtype=np.float32)
         node_feat = np.asarray(f['node_feat'][()], dtype=np.int32)
         node_embd = np.asarray(f['node_embd'][()], dtype=np.float32)
         edge_feat = np.asarray(f['edge_feat'][()], dtype=np.int32)
-        edge_index = np.asarray(f['edge_index'][()], dtype=np.uint8)
+        edge_index = np.asarray(f['edge_index'][()], dtype=np.int32)
+        edge_index_2hop = np.asarray(f['edge_index_2hop'][()], dtype=np.int32)
+        edge_feat_2hop = np.asarray(f['edge_feat_2hop'][()], dtype=np.int32)
+        edge_ptr_2hop = np.asarray(f['edge_ptr_2hop'][()], dtype=np.int32)
+        edge_index_3hop = np.asarray(f['edge_index_3hop'][()], dtype=np.int32)
+        edge_feat_3hop = np.asarray(f['edge_feat_3hop'][()], dtype=np.int32)
+        edge_ptr_3hop = np.asarray(f['edge_ptr_3hop'][()], dtype=np.int32)
+        edge_index_4hop = np.asarray(f['edge_index_4hop'][()], dtype=np.int32)
+        edge_feat_4hop = np.asarray(f['edge_feat_4hop'][()], dtype=np.int32)
+        edge_ptr_4hop = np.asarray(f['edge_ptr_4hop'][()], dtype=np.int32)
         node_ptr = np.asarray(f['node_ptr'][()], dtype=np.int32)
         edge_ptr = np.asarray(f['edge_ptr'][()], dtype=np.int32)
 
-    return labels, node_feat, node_embd, edge_feat, edge_index, node_ptr, edge_ptr
+    return (
+        labels,
+        node_feat,
+        node_embd,
+        edge_feat,
+        edge_index,
+        node_ptr,
+        edge_ptr,
+        edge_index_2hop,
+        edge_feat_2hop,
+        edge_ptr_2hop,
+        edge_index_3hop,
+        edge_feat_3hop,
+        edge_ptr_3hop,
+        edge_index_4hop,
+        edge_feat_4hop,
+        edge_ptr_4hop,
+    )
 
 
 class PCQM4Mv2Dataset(object):
@@ -600,6 +903,15 @@ class PCQM4Mv2Dataset(object):
                 self.edge_index,
                 self.node_ptr,
                 self.edge_ptr,
+                self.edge_index_2hop,
+                self.edge_feat_2hop,
+                self.edge_ptr_2hop,
+                self.edge_index_3hop,
+                self.edge_feat_3hop,
+                self.edge_ptr_3hop,
+                self.edge_index_4hop,
+                self.edge_feat_4hop,
+                self.edge_ptr_4hop,
             ) = _load_hdf5(pre_processed_file_path)
             self.graphs = None
         
@@ -644,6 +956,12 @@ class PCQM4Mv2Dataset(object):
                             'node_embd': np.zeros((0, NODE_CONTINUOUS_DIM), dtype=np.float16),
                             'edge_feat': np.zeros((0, 0), dtype=np.uint8),
                             'edge_index': np.zeros((2, 0), dtype=np.int32),
+                            'edge_index_2hop': np.zeros((2, 0), dtype=np.int32),
+                            'edge_feat_2hop': np.zeros((0, 2), dtype=np.uint8),
+                            'edge_index_3hop': np.zeros((2, 0), dtype=np.int32),
+                            'edge_feat_3hop': np.zeros((0, 3), dtype=np.uint8),
+                            'edge_index_4hop': np.zeros((2, 0), dtype=np.int32),
+                            'edge_feat_4hop': np.zeros((0, 4), dtype=np.uint8),
                             'num_nodes': 0,
                         }
                         homolumogap = -1
@@ -656,6 +974,12 @@ class PCQM4Mv2Dataset(object):
                             'node_embd': np.zeros((0, NODE_CONTINUOUS_DIM), dtype=np.float16),
                             'edge_feat': np.zeros((0, 0), dtype=np.uint8),
                             'edge_index': np.zeros((2, 0), dtype=np.int32),
+                            'edge_index_2hop': np.zeros((2, 0), dtype=np.int32),
+                            'edge_feat_2hop': np.zeros((0, 2), dtype=np.uint8),
+                            'edge_index_3hop': np.zeros((2, 0), dtype=np.int32),
+                            'edge_feat_3hop': np.zeros((0, 3), dtype=np.uint8),
+                            'edge_index_4hop': np.zeros((2, 0), dtype=np.int32),
+                            'edge_feat_4hop': np.zeros((0, 4), dtype=np.uint8),
                             'num_nodes': 0,
                         }
                         homolumogap = -1
@@ -686,6 +1010,15 @@ class PCQM4Mv2Dataset(object):
                 self.edge_index,
                 self.node_ptr,
                 self.edge_ptr,
+            self.edge_index_2hop,
+            self.edge_feat_2hop,
+            self.edge_ptr_2hop,
+            self.edge_index_3hop,
+            self.edge_feat_3hop,
+            self.edge_ptr_3hop,
+            self.edge_index_4hop,
+            self.edge_feat_4hop,
+            self.edge_ptr_4hop,
             ) = _load_hdf5(pre_processed_file_path)
             self.graphs = None
 
@@ -709,6 +1042,12 @@ class PCQM4Mv2Dataset(object):
                 node_end = int(self.node_ptr[idx + 1])
                 edge_start = int(self.edge_ptr[idx])
                 edge_end = int(self.edge_ptr[idx + 1])
+                edge_start_2hop = int(self.edge_ptr_2hop[idx])
+                edge_end_2hop = int(self.edge_ptr_2hop[idx + 1])
+                edge_start_3hop = int(self.edge_ptr_3hop[idx])
+                edge_end_3hop = int(self.edge_ptr_3hop[idx + 1])
+                edge_start_4hop = int(self.edge_ptr_4hop[idx])
+                edge_end_4hop = int(self.edge_ptr_4hop[idx + 1])
 
                 return (
                     {
@@ -716,8 +1055,17 @@ class PCQM4Mv2Dataset(object):
                         'node_embd': self.node_embd[node_start:node_end],
                         'edge_feat': self.edge_feat[edge_start:edge_end],
                         'edge_index': self.edge_index[:, edge_start:edge_end],
+                        'edge_index_2hop': self.edge_index_2hop[:, edge_start_2hop:edge_end_2hop],
+                        'edge_feat_2hop': self.edge_feat_2hop[edge_start_2hop:edge_end_2hop],
+                        'edge_index_3hop': self.edge_index_3hop[:, edge_start_3hop:edge_end_3hop],
+                        'edge_feat_3hop': self.edge_feat_3hop[edge_start_3hop:edge_end_3hop],
+                        'edge_index_4hop': self.edge_index_4hop[:, edge_start_4hop:edge_end_4hop],
+                        'edge_feat_4hop': self.edge_feat_4hop[edge_start_4hop:edge_end_4hop],
                         'num_nodes': node_end - node_start,
                         'num_edges': edge_end - edge_start,
+                        'num_2hop_edges': edge_end_2hop - edge_start_2hop,
+                        'num_3hop_edges': edge_end_3hop - edge_start_3hop,
+                        'num_4hop_edges': edge_end_4hop - edge_start_4hop,
                     },
                     self.labels[idx],
                 )
