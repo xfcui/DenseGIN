@@ -12,7 +12,7 @@ PROJECT_ROOT = osp.abspath(osp.join(SCRIPT_DIR, "..", ".."))
 SRC_DIR = osp.join(PROJECT_ROOT, "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
-from dataset import _active_hydrogen_mask, _is_active_hydrogen  # noqa: E402
+from dataset import _keep_atom_mask, _is_polar_hydrogen  # noqa: E402
 
 
 def parse_args():
@@ -81,7 +81,7 @@ def count_hydrogen_types(smiles: str) -> tuple[int, int] | None:
         return None
 
     mol_with_hs = Chem.AddHs(mol)
-    keep_atom = _active_hydrogen_mask(mol_with_hs)
+    keep_atom = _keep_atom_mask(mol_with_hs)
 
     active_h_count = 0
     non_active_h_count = 0
@@ -99,7 +99,7 @@ def count_hydrogen_types(smiles: str) -> tuple[int, int] | None:
         for atom in mol_with_hs.GetAtoms():
             if atom.GetAtomicNum() != 1:
                 continue
-            if _is_active_hydrogen(atom):
+            if _is_polar_hydrogen(atom):
                 active_h_count += 1
             else:
                 non_active_h_count += 1

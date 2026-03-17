@@ -11,7 +11,7 @@ SCRIPT_DIR = osp.dirname(osp.abspath(__file__))
 SRC_DIR = osp.abspath(osp.join(SCRIPT_DIR, "..", "..", "src"))
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
-from dataset import _rotatable_bond_indices  # noqa: E402
+from dataset import _rotatable_bonds  # noqa: E402
 
 
 
@@ -82,7 +82,7 @@ def count_rotatable_and_non_rotatable_bonds(smiles: str) -> tuple[int, int] | No
         return None
     mol = Chem.AddHs(mol)
 
-    rotatable = len(_rotatable_bond_indices(mol))
+    rotatable = len(_rotatable_bonds(mol))
     total_bonds = mol.GetNumBonds()
     return rotatable, total_bonds - rotatable
 
@@ -93,7 +93,7 @@ def count_rotatable_and_heavy_atoms(smiles: str) -> tuple[int, int] | None:
     if mol is None:
         return None
     mol = Chem.AddHs(mol)
-    rotatable = len(_rotatable_bond_indices(mol))
+    rotatable = len(_rotatable_bonds(mol))
     heavy_atoms = mol.GetNumHeavyAtoms()
     return rotatable, heavy_atoms
 

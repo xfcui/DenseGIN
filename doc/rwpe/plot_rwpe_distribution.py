@@ -14,7 +14,7 @@ SRC_DIR = osp.join(PROJECT_ROOT, "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from dataset import smiles2graph, _compute_rwpe
+from dataset import mol_to_graph, _rwpe
 
 
 def parse_args():
@@ -88,7 +88,7 @@ def sample_rwpe_from_smiles(smiles_samples: np.ndarray, dim: int) -> tuple[np.nd
     valid_molecules = 0
     for smiles in smiles_samples:
         try:
-            graph = smiles2graph(smiles)
+            graph = mol_to_graph(smiles)
         except Exception:
             continue
 
@@ -97,7 +97,7 @@ def sample_rwpe_from_smiles(smiles_samples: np.ndarray, dim: int) -> tuple[np.nd
 
         edge_index = np.asarray(graph["edge_index"], dtype=np.int64)
         num_nodes = int(graph["num_nodes"])
-        rwpe = _compute_rwpe(num_nodes=num_nodes, edge_index=edge_index, rwpe_dim=dim)
+        rwpe = _rwpe(num_nodes=num_nodes, edge_index=edge_index, rwpe_dim=dim)
         if rwpe.shape[0] > 0:
             sampled_chunks.append(rwpe)
             valid_molecules += 1
