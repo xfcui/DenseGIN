@@ -6,3 +6,4 @@ ogb
 rdkit
 jax
 equinox
+optax

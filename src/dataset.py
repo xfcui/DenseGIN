@@ -14,7 +14,7 @@ from tqdm.auto import tqdm
 
 
 allowable_features = {
-    'possible_atomic_num_list' : list(range(1, 119)) + ['misc'],
+    'possible_atomic_num_list' : list(range(1, 35)) + ['misc'],
     'possible_chirality_list' : [
         'CHI_UNSPECIFIED',
         'CHI_TETRAHEDRAL_CW',
@@ -28,7 +28,7 @@ allowable_features = {
     'possible_number_radical_e_list': [0, 1, 2, 3, 4, 'misc'],
     'possible_hybridization_list' : [
         'SP', 'SP2', 'SP3', 'SP3D', 'SP3D2', 'misc'
-        ],
+    ],
     'possible_is_aromatic_list': [False, True],
     'possible_is_in_ring_list': [False, True],
     'possible_bond_type_list' : [
@@ -52,72 +52,77 @@ allowable_features = {
 }
 
 
-try:
-    _PT = Chem.GetPeriodicTable()
-    if hasattr(_PT, 'GetPaulingElectronegativity'):
-        _CARBON_EN = float(_PT.GetPaulingElectronegativity(6))
-    else:
-        _CARBON_EN = 2.55
-except (AttributeError, ValueError, TypeError):
-    _CARBON_EN = 2.55
+_CARBON_EN = 2.55
 _HBOND_DONOR_ATOMIC_NUMBERS = {7, 8, 16}
+# Strict rotatable bond SMARTS (Oprea definition).
+# Acyclic single bond where neither end is terminal, triple-bonded, methyl,
+# trihalomethyl (CF3/CCl3/CBr3), or t-butyl.  Amide-like C(=X)–Y bonds
+# (X,Y in {N,O,S}) are excluded via one-sided constraints that SMARTS
+# matching applies symmetrically over both atom orderings.
+_ROT_BASE = (                       # filters applied to BOTH end-atoms
+    '!$(*#*)'                       # not in a triple bond
+    '&!D1'                          # not terminal
+    '&!$(C(F)(F)F)'                 # not CF3
+    '&!$(C(Cl)(Cl)Cl)'             # not CCl3
+    '&!$(C(Br)(Br)Br)'             # not CBr3
+    '&!$(C([CH3])([CH3])[CH3])'    # not t-butyl centre
+    '&!$([CH3])'                    # not methyl
+)
+_ROT_AMIDE = (                      # extra filters on ONE end-atom
+    '&!$([CD3](=[N,O,S])-!@[#7,O,S!D1])'   # amide-like C→heteroatom
+    '&!$([#7,O,S!D1]-!@[CD3]=[N,O,S])'     # heteroatom→amide-like C
+    '&!$([CD3](=[N+])-!@[#7!D1])'           # guanidinium-like C→N
+    '&!$([#7!D1]-!@[CD3]=[N+])'             # N→guanidinium-like C
+)
 _ROTATABLE_BOND_SMARTS = Chem.MolFromSmarts(
-    '[!$(*#*)&!D1&!$(C(F)(F)F)&!$(C(Cl)(Cl)Cl)&!$(C(Br)(Br)Br)&!$(C([CH3])([CH3])[CH3])&!$([CH3])&!$([CD3](=[N,O,S])-!@[#7,O,S!D1])&!$([#7,O,S!D1]-!@[CD3]=[N,O,S])&!$([CD3](=[N+])-!@[#7!D1])&!$([#7!D1]-!@[CD3]=[N+])]-,:;!@[!$(*#*)&!D1&!$(C(F)(F)F)&!$(C(Cl)(Cl)Cl)&!$(C(Br)(Br)Br)&!$(C([CH3])([CH3])[CH3])&!$([CH3])]'
+    f'[{_ROT_BASE}{_ROT_AMIDE}]'
+    '-,:;!@'                        # acyclic single / aromatic bond
+    f'[{_ROT_BASE}]'
 )
 RWPE_DIM = 12
 EN_DIM = 1
 GC_DIM = 1
 COORD_DIM = 3
 NODE_CONTINUOUS_DIM = RWPE_DIM + EN_DIM + GC_DIM + COORD_DIM
-# Fallback Pauling electronegativity lookup (used if RDKit API is unavailable).
-# Values keyed by atomic number; unknown elements fallback to carbon-centered mean value.
+# Pauling electronegativity by atomic number; unlisted elements default to _CARBON_EN.
 _PAULING_EN = {
-    1: 2.20,   # H
-    3: 0.98,   # Li
-    4: 1.57,   # Be
-    5: 2.04,   # B
-    6: 2.55,   # C
-    7: 3.04,   # N
-    8: 3.44,   # O
-    9: 3.98,   # F
-    11: 0.93,  # Na
-    12: 1.31,  # Mg
-    13: 1.61,  # Al
-    14: 1.90,  # Si
-    15: 2.19,  # P
-    16: 2.58,  # S
-    17: 3.16,  # Cl
-    19: 0.82,  # K
-    20: 1.00,  # Ca
-    21: 1.36,  # Sc
-    22: 1.54,  # Ti
-    23: 1.63,  # V
-    24: 1.66,  # Cr
-    25: 1.55,  # Mn
-    26: 1.83,  # Fe
-    27: 1.88,  # Co
-    28: 1.91,  # Ni
-    29: 1.90,  # Cu
-    30: 1.65,  # Zn
-    31: 1.81,  # Ga
-    32: 2.01,  # Ge
-    33: 2.18,  # As
-    34: 2.55,  # Se
-    35: 2.96,  # Br
-    53: 2.66,  # I
+    1: 2.20,    # H
+    3: 0.98,    # Li
+    4: 1.57,    # Be
+    5: 2.04,    # B
+    6: 2.55,    # C
+    7: 3.04,    # N
+    8: 3.44,    # O
+    9: 3.98,    # F
+    11: 0.93,   # Na
+    12: 1.31,   # Mg
+    13: 1.61,   # Al
+    14: 1.90,   # Si
+    15: 2.19,   # P
+    16: 2.58,   # S
+    17: 3.16,   # Cl
+    19: 0.82,   # K
+    20: 1.00,   # Ca
+    21: 1.36,   # Sc
+    22: 1.54,   # Ti
+    23: 1.63,   # V
+    24: 1.66,   # Cr
+    25: 1.55,   # Mn
+    26: 1.83,   # Fe
+    27: 1.88,   # Co
+    28: 1.91,   # Ni
+    29: 1.90,   # Cu
+    30: 1.65,   # Zn
+    31: 1.81,   # Ga
+    32: 2.01,   # Ge
+    33: 2.18,   # As
+    34: 2.55,   # Se
+    35: 2.96,   # Br
 }
 
 
 def _get_centered_en(atom):
-    try:
-        if hasattr(_PT, 'GetPaulingElectronegativity'):
-            en = _PT.GetPaulingElectronegativity(atom.GetAtomicNum())
-            if en is not None:
-                return float(en - _CARBON_EN)
-    except (AttributeError, ValueError, TypeError):
-        pass
-
-    en = _PAULING_EN.get(atom.GetAtomicNum(), _CARBON_EN)
+    en = _PAULING_EN.get(atom.GetAtomicNum())
     if en is None:
         en = _CARBON_EN
     return float(en - _CARBON_EN)

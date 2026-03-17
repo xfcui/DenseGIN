@@ -1,6 +1,5 @@
 # Data files
 dataset/
-dataset/**/processed
 *.h5
 *.hdf5
 *.pkl

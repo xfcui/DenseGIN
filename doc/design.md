@@ -196,3 +196,20 @@ desirable (e.g. for the RWPE or coordinate pathways).
 5. **Robustness.** Gasteiger charge NaN-guarded, EN double-fallback
    (RDKit API → curated table → carbon default), coordinates zero-filled
    when conformer absent.
+
+6. **Absolute per-atom over pairwise edge encodings.** EN and Gasteiger
+   charge are stored as per-atom (node) values, not as per-bond (edge)
+   differences or sums. Three alternatives were compared:
+
+   | Encoding | What it captures | What it loses |
+   |---|---|---|
+   | Absolute per atom: \(x_i\) | Full information | Nothing (difference and sum are derivable in one message-passing step) |
+   | Difference per edge: \(x_i - x_j\) | Bond polarization | Absolute energy level (mean of the pair) |
+   | Sum per edge: \(x_i + x_j\) | Bond energy level | Polarization direction (spread of the pair) |
+
+   Difference and sum are complementary projections — together they form a
+   lossless transform \((x_i, x_j) \leftrightarrow \bigl(\tfrac{x_i+x_j}{2},\, x_i - x_j\bigr)\) —
+   but each alone discards exactly the information the other preserves.
+   Absolute per-atom values are strictly dominant: they are already lossless,
+   and any pairwise function (difference, sum, product) is trivially
+   derivable in a single GNN layer via \(m_{ij} = f(h_i, h_j)\).
