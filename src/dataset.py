@@ -121,24 +121,6 @@ _PAULING_EN = {
 }
 
 
-def _get_centered_en(atom):
-    en = _PAULING_EN.get(atom.GetAtomicNum())
-    if en is None:
-        en = _CARBON_EN
-    return float(en - _CARBON_EN)
-
-
-def _get_gasteiger_charge(atom) -> float:
-    """Return the Gasteiger partial charge for an atom, falling back to 0.0 on failure."""
-    try:
-        gc = atom.GetDoubleProp('_GasteigerCharge')
-        if gc != gc or abs(gc) > 4.0:  # NaN check and outlier guard
-            return 0.0
-        return float(gc)
-    except KeyError:
-        return 0.0
-
-
 def _is_active_hydrogen(atom):
     if atom.GetAtomicNum() != 1:
         return False
@@ -173,6 +155,84 @@ def _active_hydrogen_mask(mol_with_hs):
             keep_atom[idx] = True
 
     return keep_atom
+
+
+def _add_active_hydrogen_nodes(graph: Dict, smiles: str) -> Dict:
+    """Keep all non-hydrogen atoms and donor-attached hydrogens only."""
+    try:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return graph
+        mol_with_hs = Chem.AddHs(mol)
+    except Exception:
+        return graph
+
+    donor_atomic_nums = {7, 8, 16}
+    keep_atom = np.zeros(mol_with_hs.GetNumAtoms(), dtype=np.bool_)
+    for atom in mol_with_hs.GetAtoms():
+        if atom.GetAtomicNum() != 1:
+            keep_atom[atom.GetIdx()] = True
+            continue
+
+        neighbors = atom.GetNeighbors()
+        if len(neighbors) != 1:
+            continue
+        parent = neighbors[0]
+        if parent.GetAtomicNum() in donor_atomic_nums:
+            keep_atom[atom.GetIdx()] = True
+
+    if not keep_atom.any():
+        return graph
+
+    node_feat = np.asarray(graph['node_feat'])
+    if node_feat.ndim != 2 or node_feat.shape[0] != mol_with_hs.GetNumAtoms():
+        return graph
+
+    keep_idx = np.flatnonzero(keep_atom)
+    if len(keep_idx) == mol_with_hs.GetNumAtoms():
+        graph['num_nodes'] = len(keep_idx)
+        return graph
+
+    old_to_new = -np.ones(mol_with_hs.GetNumAtoms(), dtype=np.int32)
+    old_to_new[keep_idx] = np.arange(len(keep_idx))
+
+    edge_index = np.asarray(graph['edge_index'])
+    edge_feat = np.asarray(graph['edge_feat'])
+
+    if edge_index.size == 0:
+        filtered_edge_index = edge_index
+        filtered_edge_feat = edge_feat
+    else:
+        edge_mask = keep_atom[edge_index[0]] & keep_atom[edge_index[1]]
+        filtered_edge_index = edge_index[:, edge_mask]
+        filtered_edge_feat = edge_feat[edge_mask]
+        filtered_edge_index = old_to_new[filtered_edge_index]
+
+    return {
+        'edge_index': np.asarray(filtered_edge_index, dtype=np.int32),
+        'edge_feat': np.asarray(filtered_edge_feat, dtype=np.int8),
+        'node_feat': node_feat[keep_idx],
+        'node_rwpe': np.asarray(graph.get('node_rwpe', np.zeros((len(node_feat), NODE_CONTINUOUS_DIM), dtype=np.float16)))[keep_idx],
+        'num_nodes': len(keep_idx),
+    }
+
+
+def _get_centered_en(atom):
+    en = _PAULING_EN.get(atom.GetAtomicNum())
+    if en is None:
+        en = _CARBON_EN
+    return float(en - _CARBON_EN)
+
+
+def _get_gasteiger_charge(atom) -> float:
+    """Return the Gasteiger partial charge for an atom, falling back to 0.0 on failure."""
+    try:
+        gc = atom.GetDoubleProp('_GasteigerCharge')
+        if gc != gc or abs(gc) > 4.0:  # NaN check and outlier guard
+            return 0.0
+        return float(gc)
+    except KeyError:
+        return 0.0
 
 
 def _compute_rwpe(num_nodes: int, edge_index: np.ndarray, rwpe_dim: int = RWPE_DIM) -> np.ndarray:
@@ -311,6 +371,115 @@ def bond_to_feature_vector(bond, rotatable_bond_indices: set[int] | None = None)
     return bond_feature
 
 
+def ReorderCanonicalRankAtoms(mol):
+    order = tuple(i for _, i in sorted((j, i) for i, j in enumerate(Chem.CanonicalRankAtoms(mol))))
+    mol_renum = Chem.RenumberAtoms(mol, order)
+    return mol_renum, order
+
+
+def smiles2graph(smiles_string, removeHs=True, reorder_atoms=False, sdf_mol=None):
+    """
+    Converts SMILES string to graph Data object
+    :input: SMILES string (str)
+    :return: graph object
+    """
+
+    mol = Chem.MolFromSmiles(smiles_string)
+    if mol is None:
+        return None
+
+    mol = Chem.AddHs(mol)
+    try:
+        rdPartialCharges.ComputeGasteigerCharges(mol)
+    except Exception:
+        pass  # charges will fall back to 0.0 via _get_gasteiger_charge
+    if removeHs:
+        keep_atom = _active_hydrogen_mask(mol)
+    else:
+        keep_atom = np.ones(mol.GetNumAtoms(), dtype=np.bool_)
+
+    if reorder_atoms:
+        mol, order = ReorderCanonicalRankAtoms(mol)
+        keep_atom = keep_atom[list(order)]
+
+    keep_idx = np.flatnonzero(keep_atom)
+    if len(keep_idx) == 0:
+        edge_index = np.empty((2, 0), dtype=np.int64)
+        edge_attr = np.empty((0, 5), dtype=np.int64)
+        return {
+            'edge_index': edge_index,
+            'edge_feat': edge_attr,
+            'node_feat': np.empty((0, 0), dtype=np.int64),
+            'node_rwpe': np.zeros((0, NODE_CONTINUOUS_DIM), dtype=np.float16),
+            'num_nodes': 0,
+        }
+
+    old_to_new = -np.ones(mol.GetNumAtoms(), dtype=np.int32)
+    old_to_new[keep_idx] = np.arange(len(keep_idx))
+    rotatable_bond_indices = _rotatable_bond_indices(mol)
+
+    # atoms
+    atom_features_list = []
+    node_en_list = []
+    node_gc_list = []
+    for atom in mol.GetAtoms():
+        if keep_atom[atom.GetIdx()]:
+            atom_features_list.append(atom_to_feature_vector(atom))
+            node_en_list.append(_get_centered_en(atom))
+            node_gc_list.append(_get_gasteiger_charge(atom))
+    node_coords = _extract_3d_coords(mol, sdf_mol, keep_atom)
+    x = np.array(atom_features_list, dtype = np.int64)
+    node_en = np.array(node_en_list, dtype=np.float16).reshape(-1, 1)
+    node_gc = np.array(node_gc_list, dtype=np.float16).reshape(-1, 1)
+    node_coords = np.asarray(node_coords, dtype=np.float16)
+
+    # bonds
+    num_bond_features = 5  # bond type, bond stereo, is_conjugated, is_rotable, ring_size
+    if len(mol.GetBonds()) > 0: # mol has bonds
+        edges_list = []
+        edge_features_list = []
+        for bond in mol.GetBonds():
+            i = bond.GetBeginAtomIdx()
+            j = bond.GetEndAtomIdx()
+            if not (keep_atom[i] and keep_atom[j]):
+                continue
+
+            edge_feature = bond_to_feature_vector(bond, rotatable_bond_indices)
+
+            # add edges in both directions
+            edges_list.append((i, j))
+            edge_features_list.append(edge_feature)
+            edges_list.append((j, i))
+            edge_features_list.append(edge_feature)
+
+        if len(edges_list) == 0:
+            edge_index = np.empty((2, 0), dtype=np.int64)
+            edge_attr = np.empty((0, num_bond_features), dtype=np.int64)
+        else:
+            # data.edge_index: Graph connectivity in COO format with shape [2, num_edges]
+            edge_index = np.array(edges_list, dtype = np.int64).T
+
+            # data.edge_attr: Edge feature matrix with shape [num_edges, num_edge_features]
+            edge_attr = np.array(edge_features_list, dtype = np.int64)
+
+    else:   # mol has no bonds
+        edge_index = np.empty((2, 0), dtype = np.int64)
+        edge_attr = np.empty((0, num_bond_features), dtype = np.int64)
+
+    graph = dict()
+    if edge_index.size != 0:
+        edge_index = old_to_new[edge_index]
+    graph['edge_index'] = edge_index
+    graph['edge_feat'] = edge_attr
+    graph['node_feat'] = x
+    graph['node_rwpe'] = np.concatenate(
+        [_compute_rwpe(len(x), edge_index, RWPE_DIM), node_en, node_gc, node_coords], axis=1
+    )
+    graph['num_nodes'] = len(x)
+
+    return graph
+
+
 def _concat_graph_blocks(graphs: list):
     """Concatenate node/edge arrays and build boundary pointers."""
     node_ptr = [0]
@@ -430,175 +599,6 @@ def _load_hdf5(path: str):
         edge_ptr = np.asarray(f['edge_ptr'][()], dtype=np.int32)
 
     return labels, node_features, node_rwpe, edge_features, edge_index, node_ptr, edge_ptr
-
-
-def ReorderCanonicalRankAtoms(mol):
-    order = tuple(i for _, i in sorted((j, i) for i, j in enumerate(Chem.CanonicalRankAtoms(mol))))
-    mol_renum = Chem.RenumberAtoms(mol, order)
-    return mol_renum, order
-
-
-def smiles2graph(smiles_string, removeHs=True, reorder_atoms=False, sdf_mol=None):
-    """
-    Converts SMILES string to graph Data object
-    :input: SMILES string (str)
-    :return: graph object
-    """
-
-    mol = Chem.MolFromSmiles(smiles_string)
-    if mol is None:
-        return None
-
-    mol = Chem.AddHs(mol)
-    try:
-        rdPartialCharges.ComputeGasteigerCharges(mol)
-    except Exception:
-        pass  # charges will fall back to 0.0 via _get_gasteiger_charge
-    if removeHs:
-        keep_atom = _active_hydrogen_mask(mol)
-    else:
-        keep_atom = np.ones(mol.GetNumAtoms(), dtype=np.bool_)
-
-    if reorder_atoms:
-        mol, order = ReorderCanonicalRankAtoms(mol)
-        keep_atom = keep_atom[list(order)]
-
-    keep_idx = np.flatnonzero(keep_atom)
-    if len(keep_idx) == 0:
-        edge_index = np.empty((2, 0), dtype=np.int64)
-        edge_attr = np.empty((0, 5), dtype=np.int64)
-        return {
-            'edge_index': edge_index,
-            'edge_feat': edge_attr,
-            'node_feat': np.empty((0, 0), dtype=np.int64),
-            'node_rwpe': np.zeros((0, NODE_CONTINUOUS_DIM), dtype=np.float16),
-            'num_nodes': 0,
-        }
-
-    old_to_new = -np.ones(mol.GetNumAtoms(), dtype=np.int32)
-    old_to_new[keep_idx] = np.arange(len(keep_idx))
-    rotatable_bond_indices = _rotatable_bond_indices(mol)
-
-    # atoms
-    atom_features_list = []
-    node_en_list = []
-    node_gc_list = []
-    for atom in mol.GetAtoms():
-        if keep_atom[atom.GetIdx()]:
-            atom_features_list.append(atom_to_feature_vector(atom))
-            node_en_list.append(_get_centered_en(atom))
-            node_gc_list.append(_get_gasteiger_charge(atom))
-    node_coords = _extract_3d_coords(mol, sdf_mol, keep_atom)
-    x = np.array(atom_features_list, dtype = np.int64)
-    node_en = np.array(node_en_list, dtype=np.float16).reshape(-1, 1)
-    node_gc = np.array(node_gc_list, dtype=np.float16).reshape(-1, 1)
-    node_coords = np.asarray(node_coords, dtype=np.float16)
-
-    # bonds
-    num_bond_features = 5  # bond type, bond stereo, is_conjugated, is_rotable, ring_size
-    if len(mol.GetBonds()) > 0: # mol has bonds
-        edges_list = []
-        edge_features_list = []
-        for bond in mol.GetBonds():
-            i = bond.GetBeginAtomIdx()
-            j = bond.GetEndAtomIdx()
-            if not (keep_atom[i] and keep_atom[j]):
-                continue
-
-            edge_feature = bond_to_feature_vector(bond, rotatable_bond_indices)
-
-            # add edges in both directions
-            edges_list.append((i, j))
-            edge_features_list.append(edge_feature)
-            edges_list.append((j, i))
-            edge_features_list.append(edge_feature)
-
-        if len(edges_list) == 0:
-            edge_index = np.empty((2, 0), dtype=np.int64)
-            edge_attr = np.empty((0, num_bond_features), dtype=np.int64)
-        else:
-            # data.edge_index: Graph connectivity in COO format with shape [2, num_edges]
-            edge_index = np.array(edges_list, dtype = np.int64).T
-
-            # data.edge_attr: Edge feature matrix with shape [num_edges, num_edge_features]
-            edge_attr = np.array(edge_features_list, dtype = np.int64)
-
-    else:   # mol has no bonds
-        edge_index = np.empty((2, 0), dtype = np.int64)
-        edge_attr = np.empty((0, num_bond_features), dtype = np.int64)
-
-    graph = dict()
-    if edge_index.size != 0:
-        edge_index = old_to_new[edge_index]
-    graph['edge_index'] = edge_index
-    graph['edge_feat'] = edge_attr
-    graph['node_feat'] = x
-    graph['node_rwpe'] = np.concatenate(
-        [_compute_rwpe(len(x), edge_index, RWPE_DIM), node_en, node_gc, node_coords], axis=1
-    )
-    graph['num_nodes'] = len(x)
-
-    return graph
-
-
-def _add_active_hydrogen_nodes(graph: Dict, smiles: str) -> Dict:
-    """Keep all non-hydrogen atoms and donor-attached hydrogens only."""
-    try:
-        mol = Chem.MolFromSmiles(smiles)
-        if mol is None:
-            return graph
-        mol_with_hs = Chem.AddHs(mol)
-    except Exception:
-        return graph
-
-    donor_atomic_nums = {7, 8, 16}
-    keep_atom = np.zeros(mol_with_hs.GetNumAtoms(), dtype=np.bool_)
-    for atom in mol_with_hs.GetAtoms():
-        if atom.GetAtomicNum() != 1:
-            keep_atom[atom.GetIdx()] = True
-            continue
-
-        neighbors = atom.GetNeighbors()
-        if len(neighbors) != 1:
-            continue
-        parent = neighbors[0]
-        if parent.GetAtomicNum() in donor_atomic_nums:
-            keep_atom[atom.GetIdx()] = True
-
-    if not keep_atom.any():
-        return graph
-
-    node_feat = np.asarray(graph['node_feat'])
-    if node_feat.ndim != 2 or node_feat.shape[0] != mol_with_hs.GetNumAtoms():
-        return graph
-
-    keep_idx = np.flatnonzero(keep_atom)
-    if len(keep_idx) == mol_with_hs.GetNumAtoms():
-        graph['num_nodes'] = len(keep_idx)
-        return graph
-
-    old_to_new = -np.ones(mol_with_hs.GetNumAtoms(), dtype=np.int32)
-    old_to_new[keep_idx] = np.arange(len(keep_idx))
-
-    edge_index = np.asarray(graph['edge_index'])
-    edge_feat = np.asarray(graph['edge_feat'])
-
-    if edge_index.size == 0:
-        filtered_edge_index = edge_index
-        filtered_edge_feat = edge_feat
-    else:
-        edge_mask = keep_atom[edge_index[0]] & keep_atom[edge_index[1]]
-        filtered_edge_index = edge_index[:, edge_mask]
-        filtered_edge_feat = edge_feat[edge_mask]
-        filtered_edge_index = old_to_new[filtered_edge_index]
-
-    return {
-        'edge_index': np.asarray(filtered_edge_index, dtype=np.int32),
-        'edge_feat': np.asarray(filtered_edge_feat, dtype=np.int8),
-        'node_feat': node_feat[keep_idx],
-        'node_rwpe': np.asarray(graph.get('node_rwpe', np.zeros((len(node_feat), NODE_CONTINUOUS_DIM), dtype=np.float16)))[keep_idx],
-        'num_nodes': len(keep_idx),
-    }
 
 
 class PCQM4Mv2Dataset(object):
