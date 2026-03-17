@@ -1,0 +1,24 @@
+---
+description: Dataloader batching uses molecule concatenation with boundary indices and fixed-size null padding
+globs: **/*.py
+alwaysApply: false
+---
+
+# Dataloader Batching
+
+- Build each batch by concatenating `k` real molecules into flat tensors and prepend one null molecule with `mol_id=0`.
+- Keep both cumulative and per-entry molecule indexing:
+  - `atom.mol_ptr` (`PyG-style`): `mol_ptr[0]=0`, and for molecule `i`, nodes are in `[mol_ptr[i], mol_ptr[i+1])`.
+  - `atom.mol_idx`: per-node molecule id with `0` for the leading null molecule.
+- For each relation (`bond`, `angle`, `torsion`), store `edge_index`, `edge_attr`, and `edge_idx` where `edge_idx` maps each edge to `mol_id`.
+- Always include one null edge per relation at the beginning of each batch (`edge_idx == 0`), with `edge_index=[0,0]`, `edge_attr=0`.
+- After concatenating, pad with null molecules until `(1 + k + pad)` is divisible by `1024`, where `pad` is the number of added molecules.
+- For every padded molecule, set `mol_id = k` and keep its contribution zero:
+  - append zeros to node/edge value tensors,
+  - keep `mol_ptr` constant across padded spans,
+  - set padded `edge_idx` entries to `k`.
+- Expose lightweight metadata for downstream slicing:
+  - `atom.num_real_molecules = k`,
+  - `atom.num_padded_molecules = pad`,
+  - `atom.padding_molecule_id = k`.
+- In the forward path, keep only the first `k` real graph outputs (`out[1:1+k]`) and ignore `0`/`k` groups in edges and aggregates.
