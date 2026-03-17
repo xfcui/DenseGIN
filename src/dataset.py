@@ -147,11 +147,7 @@ def _active_hydrogen_mask(mol_with_hs):
             keep_atom[idx] = True
             continue
 
-        neighbors = atom.GetNeighbors()
-        if len(neighbors) != 1 or not _is_active_hydrogen(atom):
-            continue
-        parent = neighbors[0]
-        if parent.GetAtomicNum() in _HBOND_DONOR_ATOMIC_NUMBERS:
+        if _is_active_hydrogen(atom):
             keep_atom[idx] = True
 
     return keep_atom
@@ -421,25 +417,21 @@ def _concat_graph_blocks(graphs: list):
     node_embd_dim = 0
     edge_feat_dim = 0
     for graph in graphs:
-        node_feat = np.asarray(graph['node_feat'])
-        node_embd = np.asarray(graph.get('node_embd', np.zeros((node_feat.shape[0], NODE_CONTINUOUS_DIM), dtype=np.float16)))
-        edge_feat = np.asarray(graph['edge_feat'])
-
-        if node_feat.size > 0 and node_feat.ndim == 2:
-            node_feat_dim = node_feat.shape[1]
-        if node_embd.size > 0 and node_embd.ndim == 2:
-            node_embd_dim = node_embd.shape[1]
-        if edge_feat.size > 0 and edge_feat.ndim == 2:
-            edge_feat_dim = edge_feat.shape[1]
-        if node_feat_dim > 0 and node_embd_dim > 0 and edge_feat_dim > 0:
-            break
-
-    if node_feat_dim == 0:
-        for graph in graphs:
+        if node_feat_dim == 0:
+            node_feat = np.asarray(graph['node_feat'])
+            if node_feat.size > 0 and node_feat.ndim == 2:
+                node_feat_dim = node_feat.shape[1]
+        if node_embd_dim == 0:
+            node_embd = np.asarray(graph.get('node_embd', np.zeros((0, NODE_CONTINUOUS_DIM), dtype=np.float16)))
+            if node_embd.size > 0 and node_embd.ndim == 2:
+                node_embd_dim = node_embd.shape[1]
+        if edge_feat_dim == 0:
             edge_feat = np.asarray(graph['edge_feat'])
             if edge_feat.size > 0 and edge_feat.ndim == 2:
                 edge_feat_dim = edge_feat.shape[1]
-                break
+        if node_feat_dim > 0 and node_embd_dim > 0 and edge_feat_dim > 0:
+            break
+
     if node_embd_dim == 0:
         node_embd_dim = NODE_CONTINUOUS_DIM
 
@@ -450,11 +442,11 @@ def _concat_graph_blocks(graphs: list):
         edge_index = np.asarray(graph['edge_index'])
 
         if node_feat.size == 0:
-            node_feat = np.zeros((0, node_feat_dim), dtype=np.int8)
+            node_feat = np.zeros((0, node_feat_dim), dtype=np.uint8)
         if node_embd.size == 0:
             node_embd = np.zeros((0, node_embd_dim), dtype=np.float16)
         if edge_feat.size == 0:
-            edge_feat = np.zeros((0, edge_feat_dim), dtype=np.int8)
+            edge_feat = np.zeros((0, edge_feat_dim), dtype=np.uint8)
 
         node_feat_list.append(node_feat)
         node_embd_list.append(node_embd)
@@ -491,10 +483,10 @@ def _concat_graph_blocks(graphs: list):
         edge_index = np.zeros((2, 0), dtype=np.int32)
 
     return (
-        np.asarray(node_feat_arr, dtype=np.int8),
+        np.asarray(node_feat_arr, dtype=np.uint8),
         np.asarray(node_embd_arr, dtype=np.float16),
-        np.asarray(edge_feat_arr, dtype=np.int8),
-        np.asarray(edge_index, dtype=np.int8),
+        np.asarray(edge_feat_arr, dtype=np.uint8),
+        np.asarray(edge_index, dtype=np.uint8),
         np.asarray(node_ptr, dtype=np.int32),
         np.asarray(edge_ptr, dtype=np.int32),
     )
@@ -522,7 +514,7 @@ def _load_hdf5(path: str):
         node_feat = np.asarray(f['node_feat'][()], dtype=np.int32)
         node_embd = np.asarray(f['node_embd'][()], dtype=np.float32)
         edge_feat = np.asarray(f['edge_feat'][()], dtype=np.int32)
-        edge_index = np.asarray(f['edge_index'][()], dtype=np.int32)
+        edge_index = np.asarray(f['edge_index'][()], dtype=np.uint8)
         node_ptr = np.asarray(f['node_ptr'][()], dtype=np.int32)
         edge_ptr = np.asarray(f['edge_ptr'][()], dtype=np.int32)
 
@@ -648,9 +640,9 @@ class PCQM4Mv2Dataset(object):
                 except AttributeError as exc:
                     if "'NoneType' object has no attribute 'GetAtoms'" in str(exc):
                         graph = {
-                            'node_feat': np.zeros((0, 0), dtype=np.int8),
+                            'node_feat': np.zeros((0, 0), dtype=np.uint8),
                             'node_embd': np.zeros((0, NODE_CONTINUOUS_DIM), dtype=np.float16),
-                            'edge_feat': np.zeros((0, 0), dtype=np.int8),
+                            'edge_feat': np.zeros((0, 0), dtype=np.uint8),
                             'edge_index': np.zeros((2, 0), dtype=np.int32),
                             'num_nodes': 0,
                         }
@@ -660,9 +652,9 @@ class PCQM4Mv2Dataset(object):
                 else:
                     if graph is None:
                         graph = {
-                            'node_feat': np.zeros((0, 0), dtype=np.int8),
+                            'node_feat': np.zeros((0, 0), dtype=np.uint8),
                             'node_embd': np.zeros((0, NODE_CONTINUOUS_DIM), dtype=np.float16),
-                            'edge_feat': np.zeros((0, 0), dtype=np.int8),
+                            'edge_feat': np.zeros((0, 0), dtype=np.uint8),
                             'edge_index': np.zeros((2, 0), dtype=np.int32),
                             'num_nodes': 0,
                         }
