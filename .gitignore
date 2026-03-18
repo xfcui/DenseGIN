@@ -1,6 +1,6 @@
 # Data files
-dataset/
-results/
+/dataset/
+/results/
 *.h5
 *.hdf5
 *.pkl
