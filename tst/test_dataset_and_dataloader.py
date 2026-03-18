@@ -105,6 +105,26 @@ def _build_toy_dataset(root: Path) -> Dict[str, np.ndarray]:
     }
 
 
+def _build_toy_dataset_with_4hop(root: Path) -> Dict[str, np.ndarray]:
+    blocks = _build_toy_dataset(root)
+    processed = root / "processed" / "data_processed.h5"
+    edge_ptr_4hop = np.array([0, 1, 2, 3], dtype=np.int32)
+    edge_index_4hop = np.array([[0, 1, 0], [1, 0, 1]], dtype=np.int32)
+    edge_feat_4hop = np.array(
+        [[1, 0, 1, 2], [3, 1, 0, 1], [2, 2, 1, 0]], dtype=np.uint8
+    )
+
+    with h5py.File(processed, "a") as f:
+        f.create_dataset("edge_ptr_4hop", data=edge_ptr_4hop)
+        f.create_dataset("edge_index_4hop", data=edge_index_4hop)
+        f.create_dataset("edge_feat_4hop", data=edge_feat_4hop)
+
+    blocks["edge_ptr_4hop"] = edge_ptr_4hop
+    blocks["edge_index_4hop"] = edge_index_4hop
+    blocks["edge_feat_4hop"] = edge_feat_4hop
+    return blocks
+
+
 def _apply_offsets(features: np.ndarray, offsets: np.ndarray) -> np.ndarray:
     return np.asarray(features, dtype=np.int32) + offsets[np.newaxis, :]
 
@@ -243,6 +263,23 @@ class PCQMDatasetTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.dataset.batch_collapse([0], pad_to_multiple=0)
 
+    def test_batch_collapse_includes_4hop_edge_keys(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            dataset_root = Path(temp_dir) / "pcqm4m-v2"
+            _build_toy_dataset_with_4hop(dataset_root)
+            dataset = PCQMDataset(
+                dataset_root=dataset_root,
+                split=None,
+                split_file=dataset_root / "split_dict.h5",
+            )
+            self.assertIn("_4hop", dataset.edge_kinds)
+            batch = dataset.batch_collapse([0, 2], pad_to_multiple=4)
+            self.assertIn("edge_4hop_index", batch)
+            self.assertIn("edge_4hop_feat", batch)
+            self.assertIn("edge_4hop_ptr", batch)
+            self.assertIn("edge_4hop_batch", batch)
+
+
 
 class PCQMDataloaderTestCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -313,6 +350,39 @@ class PCQMDataloaderTestCase(unittest.TestCase):
             PCQMDataloader(self.dataset, batch_size=0)
         with self.assertRaises(ValueError):
             PCQMDataloader(self.dataset, indices=[-1, 1])
+
+    def test_dataloader_batch_uses_new_batch_contract_keys(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            dataset_root = Path(temp_dir) / "pcqm4m-v2"
+            _build_toy_dataset_with_4hop(dataset_root)
+            dataset = PCQMDataset(
+                dataset_root=dataset_root,
+                split=None,
+                split_file=dataset_root / "split_dict.h5",
+            )
+            loader = PCQMDataloader(
+                dataset,
+                batch_size=2,
+                shuffle=False,
+                drop_last=False,
+                pad_to_multiple=4,
+            )
+            batch = next(iter(loader))
+
+            self.assertIn("node_batch", batch)
+            self.assertIn("node_embd", batch)
+            self.assertIn("batch_n_graphs", batch)
+            self.assertNotIn("node_mask", batch)
+            self.assertNotIn("batch_size", batch)
+            self.assertNotIn("node_graph_id", batch)
+
+            for suffix in dataset.edge_kinds:
+                self.assertIn(f"edge{suffix}_batch", batch)
+                self.assertIn(f"edge{suffix}_index", batch)
+                self.assertIn(f"edge{suffix}_feat", batch)
+                self.assertIn(f"edge{suffix}_ptr", batch)
+                self.assertNotIn(f"edge{suffix}_mask", batch)
+                self.assertTrue(np.all(batch[f"edge{suffix}_batch"] >= 0))
 
 
 if __name__ == "__main__":
