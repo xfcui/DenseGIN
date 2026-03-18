@@ -70,10 +70,10 @@ _ROTATABLE_BOND_SMARTS = Chem.MolFromSmarts(
 )
 
 RWPE_DIM = 12
+COORD_DIM = 3
 EN_DIM = 1
 GC_DIM = 1
-COORD_DIM = 3
-NODE_CONTINUOUS_DIM = RWPE_DIM + EN_DIM + GC_DIM + COORD_DIM
+NODE_CONTINUOUS_DIM = RWPE_DIM + COORD_DIM + EN_DIM + GC_DIM
 # Pauling electronegativity by atomic number; unlisted elements default to _CARBON_EN.
 _PAULING_EN = {
     1: 2.20,
