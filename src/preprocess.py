@@ -7,6 +7,8 @@ import argparse
 import sys
 from pathlib import Path
 
+import h5py
+
 import numpy as np
 import pandas as pd
 from rdkit import Chem
@@ -154,6 +156,17 @@ def _load_graphs_from_smiles(
     return graphs, np.asarray(labels, dtype=np.float32)
 
 
+def _print_dataset_info(out_path: Path) -> None:
+    with h5py.File(out_path, "r") as f:
+        print(f"Processed dataset file: {out_path}")
+        for key in f:
+            obj = f[key]
+            if isinstance(obj, h5py.Dataset):
+                print(f"  {key}: dtype={obj.dtype}, shape={obj.shape}")
+            else:
+                print(f"  {key}: <group>")
+
+
 def main() -> None:
     args = parse_args()
     dataset_root = Path(args.dataset_root)
@@ -161,18 +174,19 @@ def main() -> None:
     sdf_path = Path(args.sdf) if args.sdf else dataset_root / args.dataset_name / "raw" / "pcqm4m-v2-train.sdf"
     out_path = Path(args.out) if args.out else dataset_root / args.dataset_name / "processed" / "data_processed.h5"
 
-    if out_path.exists() and not args.overwrite:
-        raise FileExistsError(
-            f"{out_path} already exists. Use --overwrite to replace it."
-        )
-
     if not raw_csv.exists():
         raise FileNotFoundError(f"Input CSV not found: {raw_csv}")
+
+    if out_path.exists() and not args.overwrite:
+        print(f"Output exists; skip regeneration. Use --overwrite to replace it.")
+        _print_dataset_info(out_path)
+        return
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     graphs, labels = _load_graphs_from_smiles(raw_csv, args.smiles_col, args.label_col, sdf_path)
     save_graphs(out_path, graphs, labels)
     print(f"Saved processed dataset -> {out_path}")
+    _print_dataset_info(out_path)
 
 
 if __name__ == "__main__":
