@@ -15,7 +15,7 @@ from dataset import (
 DROPOUT    = 0.1
 DIM_HEAD   = 16
 
-EMBED_POS  = 17    # RWPE12 + coord3 + electronegativity + graph_center
+EMBED_POS  = 12    # RWPE12 only (ignore coord/en/geom auxiliaries)
 EDGE_SUFFIXES = list(EDGE_FEAT_VOCAB_SIZES.keys())
 EDGE_DIMS_PER_HOP = [
     (EDGE_FEAT_TOTAL_VOCAB[suffix], len(EDGE_FEAT_VOCAB_SIZES[suffix]))
@@ -406,7 +406,7 @@ class MetaGIN(eqx.Module):
             where X in {"", "_2hop", "_3hop", "_4hop"} and graph index 0 is null.
         """
         node_feat  = batch['node_feat']      # (N_pad, 10) int32
-        z_rw       = batch['node_embd']      # (N_pad, 17)
+        z_rw       = batch['node_embd'][..., :EMBED_POS]      # (N_pad, 12)
         graph_id   = batch['node_batch']     # (N_pad,)
         node_mask  = graph_id > 0           # (N_pad,)
         batch_size = batch['batch_n_graphs'] + 1

@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import optax
 import equinox as eqx
 from tqdm import tqdm
-from dataloader import get_jax_dataloader, to_jax_batch
+from dataset import PCQMDataset, PCQMDataloader
 from model import get_model
 
 
@@ -95,6 +95,39 @@ def get_scheduled_wd(epoch_fractional: float, k: int, weight_decay: float) -> fl
         return weight_decay
 
 
+def _resolve_dataset_root(hdf5_path: str | Path) -> Path:
+    """Resolve dataset root from legacy `processed`-path-style input."""
+    base = Path(hdf5_path)
+    if base.name == "processed":
+        return base.parent
+    if base.name == "pcqm4m-v2":
+        return base
+    if (base / "processed").is_dir():
+        return base
+    return base.parent
+
+
+def get_jax_dataloader(
+    hdf5_path: str | Path,
+    split: str,
+    batch_size: int,
+    shuffle: bool,
+    drop_last: bool,
+):
+    dataset_root = _resolve_dataset_root(hdf5_path)
+    dataset = PCQMDataset(dataset_root=dataset_root, split=split)
+    return PCQMDataloader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        drop_last=drop_last,
+    )
+
+
+def to_jax_batch(batch):
+    return {k: jnp.asarray(v) for k, v in batch.items()}
+
+
 def loss_fn(model, batch, key):
     preds = model(batch, training=(key is not None), key=key)
     preds = preds.squeeze(-1)  # (B, 1) -> (B,)
@@ -105,7 +138,7 @@ def loss_fn(model, batch, key):
             raise ValueError("Loss is NaN")
 
     # MAE with threshold mask to ignore near-zero residuals (numerical noise)
-    loss = jnp.abs(preds - batch['label'])
+    loss = jnp.abs(preds - batch['labels'])
     loss = jnp.mean(loss, where=loss > 2e-2)
     jax.debug.callback(check_nan, loss)
     return loss
