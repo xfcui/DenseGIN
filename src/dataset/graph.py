@@ -369,7 +369,7 @@ def mol_to_graph(smiles_string, removeHs=True, sdf_mol=None):
         'edge_feat_4hop': edge_feat_4hop,
         'node_feat': x,
         'node_embd': np.concatenate(
-            [_rwpe(len(x), edge_index, RWPE_DIM), node_en, node_gc, node_coords], axis=1
+            [_rwpe(len(x), edge_index, RWPE_DIM), node_coords, node_en, node_gc], axis=1
         ),
         'num_nodes': len(x),
     }

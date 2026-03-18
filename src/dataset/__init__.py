@@ -12,7 +12,6 @@ from .graph import (
 )
 from .hdf5 import *
 from .hdf5 import _pack_graphs
-from .pcqm4mv2 import *
 
 allowable_features = FEATURE_VOCAB
 safe_index = vocab_index
@@ -51,8 +50,6 @@ __all__ = [
     'save_graphs',
     'load_graphs',
     'mol_to_graph',
-    'PCQM4Mv2Dataset',
-    'PCQM4Mv2Evaluator',
     'allowable_features',
     'safe_index',
     'atom_to_feature_vector',
