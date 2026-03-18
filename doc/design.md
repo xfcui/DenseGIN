@@ -8,9 +8,10 @@ dataset (~3.8 M molecules, target: HOMO–LUMO gap in eV, metric: MAE).
 ## Graph Construction
 
 Each molecule is converted from a SMILES string into a directed graph by
-`smiles2graph` in `src/dataset.py`. The graph carries two kinds of node
-features (discrete and continuous), one set of direct-bond edge features, and
-three additional hop-aware edge sets (2-hop, 3-hop, and 4-hop).
+`mol_to_graph` (aliased as `smiles2graph`) in `src/dataset/graph.py`. The
+graph carries two kinds of node features (discrete and continuous), one set of
+direct-bond edge features, and three additional hop-aware edge sets (2-hop,
+3-hop, and 4-hop).
 
 ### Hydrogen Handling
 
@@ -38,11 +39,11 @@ table lookup in the model.
 
 | # | Feature | Vocabulary | Source |
 |---|---------|-----------|--------|
-| 0 | Atomic number | 1–118, misc | `GetAtomicNum` |
+| 0 | Atomic number | 1–34, misc | `GetAtomicNum` |
 | 1 | Chirality | 4 tags + misc | `GetChiralTag` |
 | 2 | Degree | 0–10, misc | `GetTotalDegree` |
 | 3 | Formal charge | −5 to +5, misc | `GetFormalCharge` |
-| 4 | Non-active H count | 0–8, misc | `_non_active_hydrogen_count` |
+| 4 | Non-active H count | 0–8, misc | `_implicit_h_count` |
 | 5 | Radical electrons | 0–4, misc | `GetNumRadicalElectrons` |
 | 6 | Hybridisation | SP, SP2, SP3, SP3D, SP3D2, misc | `GetHybridization` |
 | 7 | Aromatic | False, True | `GetIsAromatic` |
@@ -52,16 +53,16 @@ table lookup in the model.
 Feature 9 (min ring size) captures ring strain and fused-ring topology that
 no other single feature encodes. See `doc/ring_size/README.md`.
 
-### Continuous features (`node_rwpe`) — 17 floats per atom
+### Continuous features (`node_embd`) — 17 floats per atom
 
 Stored as a single `float16` array, concatenated in the order below.
 
 | Slice | Dim | Feature | Value range | Centering |
 |-------|-----|---------|-------------|-----------|
 | `[:12]` | 12 | RWPE | [0, 1] | None (return probabilities) |
-| `[12]` | 1 | Electronegativity | ≈ −1.7 to +1.4 | Carbon-centered (`EN − EN_C`) |
-| `[13]` | 1 | Gasteiger charge | ≈ −0.8 to +0.8 | Uncentered (neutral-mol sum ≈ 0) |
-| `[14:17]` | 3 | 3D coordinates | unbounded | Centroid-subtracted per molecule |
+| `[12:15]` | 3 | 3D coordinates | unbounded | Centroid-subtracted per molecule |
+| `[15]` | 1 | Electronegativity | ≈ −1.7 to +1.4 | Carbon-centered (`EN − EN_C`) |
+| `[16]` | 1 | Gasteiger charge | ≈ −0.8 to +0.8 | Uncentered (neutral-mol sum ≈ 0) |
 
 These four sub-features serve distinct roles:
 
@@ -69,6 +70,9 @@ These four sub-features serve distinct roles:
 return probabilities at walk lengths 1–12. Uses a lazy random walk (A + I) to
 avoid bipartite oscillation. Dimensions beyond 12 show diminishing variance on
 drug-like molecules (median diameter ~10–14).
+
+**3D coordinates** — centroid-subtracted Cartesian positions from the training
+SDF. Zero-filled when no conformer is available (test set).
 
 **Electronegativity** (`doc/electronegativity.md`) — the intrinsic tendency of
 an atom to attract electrons. Carbon-centering maps the most common element to
@@ -81,22 +85,20 @@ from EN via multi-hop message passing, but providing it explicitly gives
 shallow models access to pre-computed electronic information. NaN/outlier
 guarded (`|gc| > 4` → 0).
 
-**3D coordinates** — centroid-subtracted Cartesian positions from the training
-SDF. Zero-filled when no conformer is available (test set).
-
 ---
 
 ## Edge Features
 
-### Discrete features (`edge_feat`) — 5 indices per bond
+### Discrete features (`edge_feat`) — 6 indices per bond
 
 | # | Feature | Vocabulary | Source |
 |---|---------|-----------|--------|
 | 0 | Bond type | SINGLE, DOUBLE, TRIPLE, AROMATIC, misc | `GetBondType` |
 | 1 | Stereo | 6 stereo labels | `GetStereo` |
 | 2 | Conjugated | False, True | `GetIsConjugated` |
-| 3 | Rotatable | False, True | `_is_rotable_bond` |
+| 3 | Rotatable | False, True | `_is_rotatable` |
 | 4 | Min ring size | 3–8, misc | `MinBondRingSize` |
+| 5 | Neighbor rank | 0–10, misc | position of destination in source’s sorted neighbors | `doc/neighbor_rank/README.md` |
 
 **Rotatable bonds** (`doc/rot_bond/README.md`) — uses RDKit's strict SMARTS
 definition, which excludes partial-double-bond single bonds (amide C–N, ester
@@ -106,7 +108,17 @@ C–O). ~12% of bonds are rotatable on average.
 `MinBondRingSize`. Distinguishes bridgehead and fused bonds by the tighter
 ring constraint.
 
-All edges are stored in both directions (i→j and j→i) with identical features.
+### Chirality and Neighbor Order
+
+`GetChiralTag()` is defined relative to each atom's ordered neighbor list, but
+directed message passing is permutation-agnostic unless order-sensitive context
+is provided. `neighbor_rank` restores this information by recording the local
+position of the destination atom inside the source atom's sorted neighbor list.
+
+`neighbor_rank` is a new direct-edge feature:
+- Feature `#5` in `edge_feat`.
+- Local rank (0..10, misc) of `dst` among sorted neighbors of `src`.
+- Directional by construction, so `(u->v)` and `(v->u)` can differ.
 
 ### K-hop edge features (`edge_feat_2hop`, `edge_feat_3hop`, `edge_feat_4hop`)
 
@@ -142,23 +154,24 @@ flat concatenated arrays with boundary pointers:
 
 | Dataset | dtype | Shape |
 |---------|-------|-------|
-| `node_feat` | int8 | (total_nodes, 10) |
+| `node_feat` | uint8 | (total_nodes, 10) |
 | `node_embd` | float16 | (total_nodes, 17) |
-| `edge_feat` | int8 | (total_edges, 5) |
-| `edge_index` | int8 | (2, total_edges) |
-| `edge_index_2hop` | int8 | (2, total_2hop_edges) |
-| `edge_feat_2hop` | int8 | (total_2hop_edges, 2) |
+| `edge_feat` | uint8 | (total_edges, 5) |
+| `edge_index` | uint8 | (2, total_edges) |
+| `edge_index_2hop` | uint8 | (2, total_2hop_edges) |
+| `edge_feat_2hop` | uint8 | (total_2hop_edges, 2) |
 | `edge_ptr_2hop` | int32 | (num_molecules + 1,) |
-| `edge_index_3hop` | int8 | (2, total_3hop_edges) |
-| `edge_feat_3hop` | int8 | (total_3hop_edges, 3) |
+| `edge_index_3hop` | uint8 | (2, total_3hop_edges) |
+| `edge_feat_3hop` | uint8 | (total_3hop_edges, 3) |
 | `edge_ptr_3hop` | int32 | (num_molecules + 1,) |
-| `edge_index_4hop` | int8 | (2, total_4hop_edges) |
-| `edge_feat_4hop` | int8 | (total_4hop_edges, 4) |
+| `edge_index_4hop` | uint8 | (2, total_4hop_edges) |
+| `edge_feat_4hop` | uint8 | (total_4hop_edges, 4) |
 | `edge_ptr_4hop` | int32 | (num_molecules + 1,) |
 | `node_ptr` | int32 | (num_molecules + 1,) |
 | `edge_ptr` | int32 | (num_molecules + 1,) |
 | `labels` | float32 | (num_molecules,) |
 
+Saved compact (uint8 / float16, pointers int32); loaded back as int32 / float32.
 Molecule `i` occupies `node_ptr[i]:node_ptr[i+1]` in node arrays and
 `edge_ptr[i]:edge_ptr[i+1]` in direct-bond edge arrays, with analogous 2-hop/3-hop/4-hop
 bounds via `edge_ptr_2hop`, `edge_ptr_3hop`, and `edge_ptr_4hop`.
@@ -167,19 +180,19 @@ bounds via `edge_ptr_2hop`, `edge_ptr_3hop`, and `edge_ptr_4hop`.
 
 ## Model Integration (Recommended)
 
-The continuous features in `node_rwpe` serve three semantically distinct
-roles — **structural** (RWPE), **electronic** (EN, Gasteiger), and **spatial**
-(3D coords). Separating their projection pathways avoids forcing shared
+The continuous features in `node_embd` serve three semantically distinct
+roles — **structural** (RWPE), **spatial** (3D coords), and **electronic**
+(EN, Gasteiger). Separating their projection pathways avoids forcing shared
 capacity on unrelated signals:
 
 ```
-PE_embed   = MLP(node_rwpe[:, :12])          # structural topology
-chem_embed = MLP(node_rwpe[:, 12:14])        # electronic properties
-coord_embed = MLP(node_rwpe[:, 14:17])       # spatial geometry
+PE_embed    = MLP(node_embd[:, :12])         # structural topology
+coord_embed = MLP(node_embd[:, 12:15])       # spatial geometry
+chem_embed  = MLP(node_embd[:, 15:17])       # electronic properties
 
 atom_embed = Σ_i Embed_i(node_feat[:, i])    # discrete chemistry
 
-node_embed = atom_embed + PE_embed + chem_embed + coord_embed
+node_embed = atom_embed + PE_embed + coord_embed + chem_embed
 ```
 
 ### Why MLP, not Linear, for RWPE?
@@ -201,10 +214,10 @@ alternative if the model struggles to disentangle the streams.
 
 ## Activation Layer
 
-MoTanh (`layer/`) provides a learnable, bounded, monotone activation for
+MoTanh (`doc/mix_tanh/README.md`) provides a learnable, bounded, monotone activation for
 embedding continuous scalars into (−1, 1). It is a weighted sum of `tanh(s_i · x)`
 with softplus-normalised mixing weights and softplus-positive scales. See
-`layer/README.md` for properties and expressivity analysis.
+`doc/mix_tanh/README.md` for properties and expressivity analysis.
 
 Potential use: apply MoTanh as the nonlinearity inside the continuous-feature
 MLPs above, replacing GELU/ReLU where a bounded, order-preserving embedding is

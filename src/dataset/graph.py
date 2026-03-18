@@ -310,6 +310,21 @@ def mol_to_graph(smiles_string, removeHs=True, sdf_mol=None):
     old_to_new[keep_idx] = np.arange(len(keep_idx))
     rotatable_bond_indices = _rotatable_bonds(mol)
 
+    num_nodes = len(keep_idx)
+    neighbor_lists: list[list[int]] = [[] for _ in range(num_nodes)]
+    direct_bonds: list[tuple[int, int, object]] = []
+    if len(mol.GetBonds()) > 0:
+        for bond in mol.GetBonds():
+            i = bond.GetBeginAtomIdx()
+            j = bond.GetEndAtomIdx()
+            if not (keep_atom[i] and keep_atom[j]):
+                continue
+
+            ni, nj = int(old_to_new[i]), int(old_to_new[j])
+            neighbor_lists[ni].append(nj)
+            neighbor_lists[nj].append(ni)
+            direct_bonds.append((ni, nj, bond))
+
     atom_feat_list = []
     node_en_list = []
     node_gc_list = []
@@ -326,23 +341,30 @@ def mol_to_graph(smiles_string, removeHs=True, sdf_mol=None):
     node_gc = np.array(node_gc_list, dtype=np.float16).reshape(-1, 1)
     node_coords = np.asarray(node_coords, dtype=np.float16)
 
-    num_bond_features = 5  # bond type, bond stereo, is_conjugated, is_rotable, ring_size
-    if len(mol.GetBonds()) > 0:
+    num_bond_features = 6  # bond type, bond stereo, is_conjugated, is_rotable, ring_size, rank_in_neighbor_order
+    if direct_bonds:
+        for neighbors in neighbor_lists:
+            neighbors.sort()
+
+        rank_lookup = [
+            {neighbor: rank for rank, neighbor in enumerate(neighbors)}
+            for neighbors in neighbor_lists
+        ]
+
         edges_list = []
         edge_feat_list = []
-        for bond in mol.GetBonds():
-            i = bond.GetBeginAtomIdx()
-            j = bond.GetEndAtomIdx()
-            if not (keep_atom[i] and keep_atom[j]):
-                continue
-
+        for ni, nj, bond in direct_bonds:
             edge_feature = bond_features(bond, rotatable_bond_indices)
 
-            ni, nj = old_to_new[i], old_to_new[j]
+            rank_fwd = rank_lookup[ni].get(nj, len(FEATURE_VOCAB['possible_neighbor_rank_list']) - 1)
+            rank_rev = rank_lookup[nj].get(ni, len(FEATURE_VOCAB['possible_neighbor_rank_list']) - 1)
+            edge_feature_fwd = edge_feature + [vocab_index(FEATURE_VOCAB['possible_neighbor_rank_list'], rank_fwd)]
+            edge_feature_rev = edge_feature + [vocab_index(FEATURE_VOCAB['possible_neighbor_rank_list'], rank_rev)]
+
             edges_list.append((ni, nj))
-            edge_feat_list.append(edge_feature)
+            edge_feat_list.append(edge_feature_fwd)
             edges_list.append((nj, ni))
-            edge_feat_list.append(edge_feature)
+            edge_feat_list.append(edge_feature_rev)
 
         if len(edges_list) == 0:
             edge_index = np.empty((2, 0), dtype=np.int64)

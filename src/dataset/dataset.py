@@ -46,6 +46,7 @@ EDGE_FEAT_VOCAB_SIZES = {
         len(_FEATURE_VOCAB["possible_bond_stereo_list"]),
         len(_FEATURE_VOCAB["possible_is_conjugated_list"]),
         len(_FEATURE_VOCAB["possible_is_rotable_list"]),
+        len(_FEATURE_VOCAB["possible_neighbor_rank_list"]),
         len(_FEATURE_VOCAB["possible_ring_size_list"]),
     ],
     "_2hop": [len(_FEATURE_VOCAB["possible_path_count_list"])] * 2,

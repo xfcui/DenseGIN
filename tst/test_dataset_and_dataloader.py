@@ -62,9 +62,9 @@ def _build_toy_dataset(root: Path) -> Dict[str, np.ndarray]:
     edge_index = edge_index.T
     edge_feat = np.array(
         [
-            [0, 1, 2, 3, 4],
-            [1, 1, 1, 1, 1],
-            [2, 2, 2, 2, 2],
+            [0, 1, 2, 3, 4, 0],
+            [1, 1, 1, 1, 1, 1],
+            [2, 2, 2, 2, 2, 2],
         ],
         dtype=np.uint8,
     )
