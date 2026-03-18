@@ -291,7 +291,7 @@ def mol_to_graph(smiles_string, removeHs=True, sdf_mol=None):
     keep_idx = np.flatnonzero(keep_atom)
     if len(keep_idx) == 0:
         edge_index = np.empty((2, 0), dtype=np.int64)
-        edge_feat = np.empty((0, 5), dtype=np.int64)
+        edge_feat = np.empty((0, 6), dtype=np.int64)
         return {
             'edge_index': edge_index,
             'edge_feat': edge_feat,
@@ -341,6 +341,14 @@ def mol_to_graph(smiles_string, removeHs=True, sdf_mol=None):
     node_gc = np.array(node_gc_list, dtype=np.float16).reshape(-1, 1)
     node_coords = np.asarray(node_coords, dtype=np.float16)
 
+    _TETRAHEDRAL_CHIRAL_TAGS = {'CHI_TETRAHEDRAL_CW', 'CHI_TETRAHEDRAL_CCW'}
+    tetrahedral_chiral = set()
+    for atom in mol.GetAtoms():
+        if keep_atom[atom.GetIdx()] and str(atom.GetChiralTag()) in _TETRAHEDRAL_CHIRAL_TAGS:
+            tetrahedral_chiral.add(int(old_to_new[atom.GetIdx()]))
+
+    _RANK_MISC = len(FEATURE_VOCAB['possible_neighbor_rank_list']) - 1
+
     num_bond_features = 6  # bond type, bond stereo, is_conjugated, is_rotable, ring_size, rank_in_neighbor_order
     if direct_bonds:
         for neighbors in neighbor_lists:
@@ -356,10 +364,16 @@ def mol_to_graph(smiles_string, removeHs=True, sdf_mol=None):
         for ni, nj, bond in direct_bonds:
             edge_feature = bond_features(bond, rotatable_bond_indices)
 
-            rank_fwd = rank_lookup[ni].get(nj, len(FEATURE_VOCAB['possible_neighbor_rank_list']) - 1)
-            rank_rev = rank_lookup[nj].get(ni, len(FEATURE_VOCAB['possible_neighbor_rank_list']) - 1)
-            edge_feature_fwd = edge_feature + [vocab_index(FEATURE_VOCAB['possible_neighbor_rank_list'], rank_fwd)]
-            edge_feature_rev = edge_feature + [vocab_index(FEATURE_VOCAB['possible_neighbor_rank_list'], rank_rev)]
+            if nj in tetrahedral_chiral:
+                rank_fwd = vocab_index(FEATURE_VOCAB['possible_neighbor_rank_list'], rank_lookup[nj].get(ni, _RANK_MISC))
+            else:
+                rank_fwd = _RANK_MISC
+            if ni in tetrahedral_chiral:
+                rank_rev = vocab_index(FEATURE_VOCAB['possible_neighbor_rank_list'], rank_lookup[ni].get(nj, _RANK_MISC))
+            else:
+                rank_rev = _RANK_MISC
+            edge_feature_fwd = edge_feature + [rank_fwd]
+            edge_feature_rev = edge_feature + [rank_rev]
 
             edges_list.append((ni, nj))
             edge_feat_list.append(edge_feature_fwd)

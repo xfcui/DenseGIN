@@ -10,7 +10,7 @@ FEATURE_VOCAB = {
         'CHI_OTHER',
         'misc',
     ],
-    'possible_degree_list': [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 'misc'],
+    'possible_degree_list': [0, 1, 2, 3, 4, 5, 6, 'misc'],
     'possible_formal_charge_list': [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 'misc'],
     'possible_numH_list': [0, 1, 2, 3, 4, 5, 6, 7, 8, 'misc'],
     'possible_number_radical_e_list': [0, 1, 2, 3, 4, 'misc'],
@@ -36,7 +36,7 @@ FEATURE_VOCAB = {
     ],
     'possible_is_conjugated_list': [False, True],
     'possible_is_rotable_list': [False, True],
-    'possible_neighbor_rank_list': [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 'misc'],
+    'possible_neighbor_rank_list': [0, 1, 2, 3, 4, 5, 6, 'misc'],
     'possible_path_count_list': [0, 1, 2, 'misc'],
     'possible_ring_size_list': [3, 4, 5, 6, 7, 8, 'misc'],
 }

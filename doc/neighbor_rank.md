@@ -17,22 +17,28 @@ way to recover the spatial arrangement — CW vs CCW is structurally undefined.
 
 ## Solution: neighbor rank as a directed edge feature
 
-For each **directed** edge `(u -> v)`, store the **rank of v in u's sorted
+For each **directed** edge `(u -> v)`, store the **rank of u in v's sorted
 neighbor list**, where neighbors are sorted by their new (post-H-removal) atom
-index.
+index — **but only when v carries `CHI_TETRAHEDRAL_CW` or
+`CHI_TETRAHEDRAL_CCW`**. For all other chirality values the rank is set to
+`misc`, signalling that no ordering information is defined or needed.
 
 ```
-Atom u has kept-atom neighbors [2, 5, 8, 11] (sorted by new index)
-Edge (u -> 2):  neighbor_rank = 0
-Edge (u -> 5):  neighbor_rank = 1
-Edge (u -> 8):  neighbor_rank = 2
-Edge (u -> 11): neighbor_rank = 3
+Atom v: CHI_TETRAHEDRAL_CW, neighbors [2, 5, 8, 11] (sorted by new index)
+Edge (2  -> v): neighbor_rank = 0   # 2  is rank-0 neighbor of v
+Edge (5  -> v): neighbor_rank = 1   # 5  is rank-1 neighbor of v
+Edge (8  -> v): neighbor_rank = 2
+Edge (11 -> v): neighbor_rank = 3
+
+Atom w: CHI_UNSPECIFIED, neighbors [1, 3]
+Edge (1 -> w): neighbor_rank = misc
+Edge (3 -> w): neighbor_rank = misc
 ```
 
-The receiving atom `u` can now, in a single message-passing step, reconstruct
-the full ordered sequence of its neighbors: message from `v` carries the
-information "I am neighbor #k of yours." Combined with the CW/CCW chirality
-tag on `u`, the model can determine the 3D arrangement.
+Each incoming message to a chiral centre now carries the sender's position in
+the centre's ordered neighbor list: "I am neighbor #k of yours." The receiving
+atom can reconstruct the full ordered sequence from its incoming messages.
+Combined with the CW/CCW chirality tag, it can determine the 3D arrangement.
 
 ## Why this satisfies the stated constraints
 
@@ -76,10 +82,10 @@ chirality: symmetric features by definition cannot distinguish CW from CCW.
 ### `src/dataset/features.py`
 
 ```python
-'possible_neighbor_rank_list': [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 'misc'],
+'possible_neighbor_rank_list': [0, 1, 2, 3, 4, 5, 6, 'misc'],
 ```
 
-Same range as `possible_degree_list` (degree ≤ 10 covers all atoms in the
+Same range as `possible_degree_list` (degree ≤ 6 covers all atoms in the
 dataset). Rank is always strictly less than degree, so no extra headroom is
 needed.
 
@@ -98,17 +104,37 @@ rank_lookup = [
 ]
 ```
 
-Then each bond produces two directed edge features with different rank slots:
+Then each bond produces two directed edge features with different rank slots.
+The rank is set to `misc` whenever the **target (destination)** atom is not a
+tetrahedral chiral centre (`CHI_TETRAHEDRAL_CW` / `CHI_TETRAHEDRAL_CCW`):
 
 ```python
+_TETRAHEDRAL_CHIRAL_TAGS = {'CHI_TETRAHEDRAL_CW', 'CHI_TETRAHEDRAL_CCW'}
+tetrahedral_chiral = {
+    int(old_to_new[atom.GetIdx()])
+    for atom in mol.GetAtoms()
+    if keep_atom[atom.GetIdx()] and str(atom.GetChiralTag()) in _TETRAHEDRAL_CHIRAL_TAGS
+}
+
+_RANK_MISC = len(FEATURE_VOCAB['possible_neighbor_rank_list']) - 1
+
 for ni, nj, bond in direct_bonds:
     edge_feature = bond_features(bond, rotatable_bond_indices)
 
-    rank_fwd = rank_lookup[ni].get(nj, ...)   # rank of nj in ni's neighbors
-    rank_rev = rank_lookup[nj].get(ni, ...)   # rank of ni in nj's neighbors
+    # edge (ni -> nj): rank of ni in nj's neighbor list, gated on nj being chiral
+    if nj in tetrahedral_chiral:
+        rank_fwd = vocab_index(..., rank_lookup[nj].get(ni, _RANK_MISC))
+    else:
+        rank_fwd = _RANK_MISC
 
-    edge_feature_fwd = edge_feature + [vocab_index(..., rank_fwd)]
-    edge_feature_rev = edge_feature + [vocab_index(..., rank_rev)]
+    # edge (nj -> ni): rank of nj in ni's neighbor list, gated on ni being chiral
+    if ni in tetrahedral_chiral:
+        rank_rev = vocab_index(..., rank_lookup[ni].get(nj, _RANK_MISC))
+    else:
+        rank_rev = _RANK_MISC
+
+    edge_feature_fwd = edge_feature + [rank_fwd]
+    edge_feature_rev = edge_feature + [rank_rev]
 ```
 
 ### `src/dataset/dataset.py`
@@ -119,12 +145,12 @@ other dataset code requires changes.
 
 ## Vocabulary
 
-`possible_neighbor_rank_list = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 'misc']`
+`possible_neighbor_rank_list = [0, 1, 2, 3, 4, 5, 6, 'misc']`
 
 | Index | Meaning |
 |---|---|
-| 0–10 | Exact rank of the destination in the source's sorted neighbor list |
-| misc (11) | Fallback; should never occur for valid bonds |
+| 0–6 | Rank of the **source** atom in the **destination**'s sorted neighbor list (destination is `CHI_TETRAHEDRAL_CW` or `CHI_TETRAHEDRAL_CCW`) |
+| misc (7) | Destination is not a tetrahedral chiral centre, or rank exceeds 6 |
 
 ## Interaction with existing features
 

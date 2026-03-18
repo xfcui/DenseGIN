@@ -41,7 +41,7 @@ table lookup in the model.
 |---|---------|-----------|--------|
 | 0 | Atomic number | 1–34, misc | `GetAtomicNum` |
 | 1 | Chirality | 4 tags + misc | `GetChiralTag` |
-| 2 | Degree | 0–10, misc | `GetTotalDegree` |
+| 2 | Degree | 0–6, misc | `GetTotalDegree` |
 | 3 | Formal charge | −5 to +5, misc | `GetFormalCharge` |
 | 4 | Non-active H count | 0–8, misc | `_implicit_h_count` |
 | 5 | Radical electrons | 0–4, misc | `GetNumRadicalElectrons` |
@@ -98,7 +98,7 @@ guarded (`|gc| > 4` → 0).
 | 2 | Conjugated | False, True | `GetIsConjugated` |
 | 3 | Rotatable | False, True | `_is_rotatable` |
 | 4 | Min ring size | 3–8, misc | `MinBondRingSize` |
-| 5 | Neighbor rank | 0–10, misc | position of destination in source’s sorted neighbors | `doc/neighbor_rank/README.md` |
+| 5 | Neighbor rank | 0–6, misc | position of destination in source’s sorted neighbors | `doc/neighbor_rank/README.md` |
 
 **Rotatable bonds** (`doc/rot_bond/README.md`) — uses RDKit's strict SMARTS
 definition, which excludes partial-double-bond single bonds (amide C–N, ester
@@ -117,7 +117,7 @@ position of the destination atom inside the source atom's sorted neighbor list.
 
 `neighbor_rank` is a new direct-edge feature:
 - Feature `#5` in `edge_feat`.
-- Local rank (0..10, misc) of `dst` among sorted neighbors of `src`.
+- Local rank (0..6) of the **source** atom in the **destination**'s sorted neighbor list, **only when the destination has `CHI_TETRAHEDRAL_CW` or `CHI_TETRAHEDRAL_CCW`**; otherwise `misc`.
 - Directional by construction, so `(u->v)` and `(v->u)` can differ.
 
 ### K-hop edge features (`edge_feat_2hop`, `edge_feat_3hop`, `edge_feat_4hop`)
