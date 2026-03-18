@@ -1,6 +1,17 @@
 from .features import *
+from .features import _implicit_h_count, _is_rotatable
 from .graph import *
+from .graph import (
+    _keep_atom_mask,
+    _is_polar_hydrogen,
+    _centered_electronegativity,
+    _gasteiger_charge,
+    _rwpe,
+    _rotatable_bonds,
+    _khop_edges,
+)
 from .hdf5 import *
+from .hdf5 import _pack_graphs
 from .pcqm4mv2 import *
 
 allowable_features = FEATURE_VOCAB
@@ -9,6 +20,7 @@ atom_to_feature_vector = atom_features
 bond_to_feature_vector = bond_features
 smiles2graph = mol_to_graph
 _is_rotable_bond = _is_rotatable
+_is_rotatable = _is_rotatable
 _non_active_hydrogen_count = _implicit_h_count
 _is_active_hydrogen = _is_polar_hydrogen
 _active_hydrogen_mask = _keep_atom_mask

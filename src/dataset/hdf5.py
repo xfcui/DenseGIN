@@ -44,20 +44,22 @@ def _pack_graphs(graphs: list):
             edge_feat = np.asarray(graph['edge_feat'])
             if edge_feat.size > 0 and edge_feat.ndim == 2:
                 edge_feat_dim = edge_feat.shape[1]
-    if edge_feat_2hop_dim == 0:
-        edge_feat_2hop = np.asarray(graphs[0]['edge_feat_2hop'])
-        if edge_feat_2hop.size > 0 and edge_feat_2hop.ndim == 2:
-            edge_feat_2hop_dim = edge_feat_2hop.shape[1]
-    if edge_feat_3hop_dim == 0:
-        edge_feat_3hop = np.asarray(graphs[0]['edge_feat_3hop'])
-        if edge_feat_3hop.size > 0 and edge_feat_3hop.ndim == 2:
-            edge_feat_3hop_dim = edge_feat_3hop.shape[1]
-    if edge_feat_4hop_dim == 0:
-        edge_feat_4hop = np.asarray(graphs[0]['edge_feat_4hop'])
-        if edge_feat_4hop.size > 0 and edge_feat_4hop.ndim == 2:
-            edge_feat_4hop_dim = edge_feat_4hop.shape[1]
+        if edge_feat_2hop_dim == 0:
+            edge_feat_2hop = np.asarray(graph['edge_feat_2hop'])
+            if edge_feat_2hop.size > 0 and edge_feat_2hop.ndim == 2:
+                edge_feat_2hop_dim = edge_feat_2hop.shape[1]
+        if edge_feat_3hop_dim == 0:
+            edge_feat_3hop = np.asarray(graph['edge_feat_3hop'])
+            if edge_feat_3hop.size > 0 and edge_feat_3hop.ndim == 2:
+                edge_feat_3hop_dim = edge_feat_3hop.shape[1]
+        if edge_feat_4hop_dim == 0:
+            edge_feat_4hop = np.asarray(graph['edge_feat_4hop'])
+            if edge_feat_4hop.size > 0 and edge_feat_4hop.ndim == 2:
+                edge_feat_4hop_dim = edge_feat_4hop.shape[1]
+
         if node_feat_dim > 0 and node_embd_dim > 0 and edge_feat_dim > 0:
-            break
+            if edge_feat_2hop_dim > 0 and edge_feat_3hop_dim > 0 and edge_feat_4hop_dim > 0:
+                break
 
     if node_embd_dim == 0:
         node_embd_dim = NODE_CONTINUOUS_DIM
