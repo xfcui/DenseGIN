@@ -1,7 +1,13 @@
 import sys
 from pathlib import Path
-# Add parent directory to path so imports work when running directly
-sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Add project root and src directories to path so imports work both when
+# running this file directly and via `python -m src.train`.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SRC_DIR = PROJECT_ROOT / "src"
+for p in (PROJECT_ROOT, SRC_DIR):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
 
 import warnings
 # Suppress pkg_resources deprecation warning from outdated package (dependency of ogb)

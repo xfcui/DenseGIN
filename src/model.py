@@ -36,8 +36,18 @@ def _count_params(model: eqx.Module) -> int:
     return sum(x.size for x in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_array)))
 
 
-def _dropout_act(x, key):
-    xx = jax.nn.softplus(x)
+class ActLayer(eqx.Module):
+    bias: jnp.ndarray
+
+    def __init__(self, width, *, key=None):
+        self.bias = jnp.zeros((width,), dtype=jnp.float32)
+
+    def __call__(self, x):
+        return jax.nn.softplus(x + self.bias)
+
+
+def _dropout_act(x, key, act):
+    xx = act(x)
     if key is None or DROPOUT <= 0.0: return xx
 
     keep = 1.0 - DROPOUT
@@ -139,6 +149,7 @@ class GatedLinearBlock(eqx.Module):
     gate:  GroupLinearBlock
     value: GroupLinearBlock
     kernel: jnp.ndarray
+    act: ActLayer
     linear: LinearLayer | None
 
     def __init__(self, width_in, width_out, num_head, dim_head, scale_act, keep_groups=False, key=None):
@@ -151,6 +162,7 @@ class GatedLinearBlock(eqx.Module):
         self.dim_head = dim_head
         self.gate  = GroupLinearBlock(width_in, width_act, num_head, dim_head, keys[0])
         self.value = GroupLinearBlock(width_in, width_act, num_head, dim_head, keys[1])
+        self.act = ActLayer(width_act)
         if keep_groups:
             assert width_out % num_head == 0
             self.kernel = jax.random.normal(keys[2], (num_head, dim_head * scale_act, width_out // num_head)) * scale
@@ -169,7 +181,7 @@ class GatedLinearBlock(eqx.Module):
         # Split key for dropout if provided
         keys = _split_or_none(key, 1)
 
-        xx = _dropout_act(gg, keys[0]) * vv
+        xx = _dropout_act(gg, keys[0], self.act) * vv
         xx = xx.reshape(*x.shape[:-1], self.num_head, -1)
         xx = jnp.einsum("...hd,hdf->...hf", xx, self.kernel)
         xx = xx.reshape(*x.shape[:-1], -1)
@@ -426,4 +438,4 @@ class DenseGIN(eqx.Module):
 
 
 def get_model(key):
-    return DenseGIN(depth=6, width=256, num_head=16, dim_head=16, key=key)
+    return DenseGIN(depth=5, width=256, num_head=16, dim_head=32, key=key)
