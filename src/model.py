@@ -14,6 +14,8 @@ from dataset import (
 )
 
 DROPOUT    = 0.1
+ACT_FACTOR = 20**.5
+EPSILON    = 1e-6
 
 EMBED_POS  = 12    # RWPE12 only (ignore coord/en/geom auxiliaries)
 EDGE_SUFFIXES = list(EDGE_FEAT_VOCAB_SIZES.keys())
@@ -21,7 +23,7 @@ EDGE_DIMS_PER_HOP = [
     (EDGE_FEAT_TOTAL_VOCAB[suffix], len(EDGE_FEAT_VOCAB_SIZES[suffix]))
     for suffix in EDGE_SUFFIXES
 ]
-SCALE_GRAPH, SCALE_NODE, SCALE_EDGE = 4, 3, 2
+SCALE_ACT = 4
 
 
 def _split_or_none(key, num):
@@ -31,19 +33,12 @@ def _split_or_none(key, num):
         return [None] * num
     return list(jax.random.split(key, num))
 
+def _clip_with_grad(x, min, max):
+    return jax.lax.stop_gradient(x.clip(min, max) - x) + x
+
 def _count_params(model: eqx.Module) -> int:
     """Count the number of parameters in an Equinox module."""
     return sum(x.size for x in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_array)))
-
-
-def _dropout_act(x, key, act):
-    xx = act(x)
-    if key is None or DROPOUT <= 0.0: return xx
-
-    keep = 1.0 - DROPOUT
-    mask = jax.random.bernoulli(key, p=keep, shape=xx.shape)
-    xx = xx * mask.astype(xx.dtype) / keep
-    return xx
 
 
 class EmbedLayer(eqx.Module):
@@ -53,8 +48,7 @@ class EmbedLayer(eqx.Module):
     def __init__(self, total_vocab, num_features, width, key):
         # Concatenate all embeddings into one large array to reduce overhead
         total_dim = int(total_vocab)
-        scale = 1.0 / np.sqrt(num_features)
-        self.embeddings = jax.random.normal(key, (total_dim, width)) * scale
+        self.embeddings = jax.random.normal(key, (total_dim, width)) / np.sqrt(num_features)
 
     def __call__(self, x):
         # x: (N, num_features)
@@ -70,16 +64,8 @@ class ScaleLayer(eqx.Module):
         self.scale = jnp.full((width,), np.log(scale_init), dtype=jnp.float32)
 
     def __call__(self, x):
-        return jnp.exp(self.scale.clip(None, 0)) * x
-
-class ActLayer(eqx.Module):
-    bias: jnp.ndarray
-
-    def __init__(self, width, *, key=None):
-        self.bias = jnp.zeros((width,), dtype=jnp.float32)
-
-    def __call__(self, x):
-        return jax.nn.softplus(x + self.bias)
+        scale = _clip_with_grad(jnp.exp(self.scale), 1e-2, 1)
+        return scale * x
 
 # PNA: https://arxiv.org/abs/2004.05718
 # Graphormer: https://arxiv.org/abs/2106.05234
@@ -97,15 +83,30 @@ class DegreeLayer(eqx.Module):
     def __call__(self, x, deg):
         # x: (N, num_head * dim_head)
         # deg: (N,)
-        power = jnp.repeat(self.power.clip(None, 0), self.dim_head)
+        power = jnp.repeat(_clip_with_grad(self.power, None, 0), self.dim_head)
         return jnp.pow(deg[:, None], power) * x
+
+class ActLayer(eqx.Module):
+    bias: jnp.ndarray
+
+    def __init__(self, width, *, key=None):
+        self.bias = jnp.zeros((width,), dtype=jnp.float32)
+
+    def __call__(self, x, key=None):
+        xx = jax.nn.softplus(x + self.bias)
+        xx = _clip_with_grad(xx, 1/ACT_FACTOR, ACT_FACTOR)
+        if key is None or DROPOUT <= 0.0:
+            return xx
+
+        keep = 1.0 - DROPOUT
+        mask = jax.random.bernoulli(key, p=keep, shape=xx.shape)
+        return xx * mask.astype(xx.dtype) / keep
 
 class LinearLayer(eqx.Module):
     kernel: jnp.ndarray
 
     def __init__(self, width_in, width_out, key):
-        scale = 1.0 / np.sqrt(width_in)
-        self.kernel = jax.random.normal(key, (width_in, width_out)) * scale
+        self.kernel = jax.random.normal(key, (width_in, width_out)) / np.sqrt(width_in)
 
     def __call__(self, x):
         return x @ self.kernel
@@ -121,18 +122,17 @@ class GroupLinearBlock(eqx.Module):
     def __init__(self, width_in, width_out, num_head, dim_head, key):
         width_norm = num_head * dim_head
         keys = _split_or_none(key, 2)
-        scale = 1.0 / np.sqrt(dim_head)
 
         self.num_head  = num_head
         self.dim_head = dim_head
         self.linear = LinearLayer(width_in, width_norm, keys[0])
         assert width_out % num_head == 0
-        self.kernel = jax.random.normal(keys[1], (num_head, dim_head, width_out // num_head)) * scale
+        self.kernel = jax.random.normal(keys[1], (num_head, dim_head, width_out // num_head)) / np.sqrt(dim_head)
 
-    def __call__(self, x, norm_bias=None, eps=1e-5):
+    def __call__(self, x, norm_bias=None):
         xx = self.linear(x)
         xx = xx.reshape(*x.shape[:-1], self.num_head, -1)
-        xx = xx / jnp.sqrt(jnp.mean(jnp.square(xx), axis=-1, keepdims=True) + eps)
+        xx = xx / jnp.sqrt(jnp.mean(jnp.square(xx), axis=-1, keepdims=True) + EPSILON)
         if norm_bias is not None:
             xx = (xx + norm_bias.reshape(xx.shape)) / 2**.5
         xx = jnp.einsum("...hd,hdf->...hf", xx, self.kernel)
@@ -151,11 +151,10 @@ class GatedLinearBlock(eqx.Module):
     act: ActLayer
     linear: LinearLayer | None
 
-    def __init__(self, width_in, width_out, num_head, dim_head, scale_act, keep_groups=False, key=None):
+    def __init__(self, width_in, width_out, num_head, dim_head, keep_groups=False, key=None):
         width_norm = num_head * dim_head
-        width_act  = num_head * dim_head * scale_act
+        width_act  = num_head * dim_head * SCALE_ACT
         keys = _split_or_none(key, 4)
-        scale = 1.0 / np.sqrt(dim_head * scale_act)
 
         self.num_head = num_head
         self.dim_head = dim_head
@@ -164,10 +163,10 @@ class GatedLinearBlock(eqx.Module):
         self.act = ActLayer(width_act)
         if keep_groups:
             assert width_out % num_head == 0
-            self.kernel = jax.random.normal(keys[2], (num_head, dim_head * scale_act, width_out // num_head)) * scale
+            self.kernel = jax.random.normal(keys[2], (num_head, dim_head * SCALE_ACT, width_out // num_head)) / np.sqrt(dim_head * SCALE_ACT)
             self.linear = None
         else:
-            self.kernel = jax.random.normal(keys[2], (num_head, dim_head * scale_act, dim_head)) * scale
+            self.kernel = jax.random.normal(keys[2], (num_head, dim_head * SCALE_ACT, dim_head)) / np.sqrt(dim_head * SCALE_ACT)
             self.linear = LinearLayer(width_norm, width_out, keys[3])
 
     def __call__(self, x, y=None, gate_bias=None, value_bias=None, key=None):
@@ -180,7 +179,7 @@ class GatedLinearBlock(eqx.Module):
         # Split key for dropout if provided
         keys = _split_or_none(key, 1)
 
-        xx = _dropout_act(gg, keys[0], self.act) * vv
+        xx = self.act(gg, keys[0]) * vv
         xx = xx.reshape(*x.shape[:-1], self.num_head, -1)
         xx = jnp.einsum("...hd,hdf->...hf", xx, self.kernel)
         xx = xx.reshape(*x.shape[:-1], -1)
@@ -194,12 +193,12 @@ class MetaFormerBlock(eqx.Module):
     glu_pre:  GatedLinearBlock
     glu_post: GatedLinearBlock
 
-    def __init__(self, width, num_head, dim_head, scale_act, key=None):
+    def __init__(self, width, num_head, dim_head, key=None):
         keys = _split_or_none(key, 2)
 
         self.sca_pre  = ScaleLayer(width, scale_init=1.0)
-        self.glu_pre  = GatedLinearBlock(width, width, num_head, dim_head, scale_act, key=keys[0])
-        self.glu_post = GatedLinearBlock(width, width, num_head, dim_head, scale_act, key=keys[1])
+        self.glu_pre  = GatedLinearBlock(width, width, num_head, dim_head, key=keys[0])
+        self.glu_post = GatedLinearBlock(width, width, num_head, dim_head, key=keys[1])
 
         print(f"##params[meta]:", _count_params(self))
 
@@ -214,38 +213,41 @@ class MetaFormerBlock(eqx.Module):
 # GNN-AK: https://openreview.net/forum?id=Mspk_WYKoEH
 class ConvKernel(eqx.Module):
     """Bond-aware graph convolution with degree normalisation."""
-    embed: EmbedLayer
-    glu: GatedLinearBlock
-    deg: DegreeLayer
+    scale:      jnp.ndarray
+    embed_edge: EmbedLayer
+    embed_deg:  EmbedLayer
+    lin_pre:    LinearLayer
+    glu_post:   GatedLinearBlock
 
     def __init__(self, width, num_head, dim_head, edge_total_vocab, edge_num_features, key=None):
         width_norm = num_head * dim_head
-        keys = _split_or_none(key, 2)
+        keys = _split_or_none(key, 4)
 
-        self.embed = EmbedLayer(edge_total_vocab, edge_num_features, width_norm, keys[0])
-        self.glu = GatedLinearBlock(width, width_norm, num_head, dim_head, SCALE_EDGE, keep_groups=True, key=keys[1])
-        self.deg = DegreeLayer(num_head, dim_head)
+        self.scale      = jnp.zeros((1, width_norm), dtype=jnp.float32) + np.log(np.expm1(2e-2))
+        self.embed_edge = EmbedLayer(edge_total_vocab, edge_num_features, width, keys[0])
+        self.embed_deg  = EmbedLayer(6, 1, width_norm, keys[1])
+        self.lin_pre    = LinearLayer(width, width_norm, keys[2])
+        self.glu_post   = GatedLinearBlock(width_norm, width_norm, num_head, dim_head, keep_groups=True, key=keys[3])
 
         print(f"##params[conv]:", _count_params(self), edge_total_vocab, edge_num_features)
 
-    def __call__(self, x, deg, edge_idx, edge_attr, edge_mask, key=None):
+    def __call__(self, x, deg, edge_idx, edge_attr, key=None):
         """
         edge_idx:  (2, E_pad) global node indices
         edge_attr: (E_pad, num_bond_features) int32
-        edge_mask: (E_pad,) bool — False for padding entries
         """
-        # Sum embeddings across all bond feature dimensions for the gate bias
-        msg = self.embed(edge_attr)
-        msg = self.glu(x[edge_idx[1]], x[edge_idx[0]], gate_bias=msg, key=key)
-        msg = segment_sum(msg, edge_idx[1], len(x))
-        msg = self.deg(msg, deg)
-        return msg
+        msg = self.lin_pre(x)[edge_idx[0]] \
+            + jnp.sum(x[edge_idx[0]] * self.embed_edge(edge_attr), axis=-1, keepdims=True) \
+            @ _clip_with_grad(jax.nn.softplus(self.scale), 1e-2, 1)
+        xx = segment_sum(msg, edge_idx[1], len(x))
+        xx = self.glu_post(xx, gate_bias=self.embed_deg(deg[:, None]), key=key)
+        return xx
 
 # GIN-virtual: https://arxiv.org/abs/2103.09430
 class VirtKernel(eqx.Module):
     """Virtual node aggregation for global information exchange."""
     num_head: int
-    glu_pre:  GatedLinearBlock
+    lin_pre:  LinearLayer
     glu_post: GatedLinearBlock
 
     def __init__(self, width, num_head, dim_head, key=None):
@@ -253,14 +255,15 @@ class VirtKernel(eqx.Module):
         keys = _split_or_none(key, 2)
 
         self.num_head = num_head
-        self.glu_pre  = GatedLinearBlock(width, width_norm, num_head, dim_head, SCALE_EDGE, keep_groups=True, key=keys[0])
-        self.glu_post = GatedLinearBlock(width_norm, width_norm, num_head, dim_head, SCALE_GRAPH, keep_groups=True, key=keys[1])
+        self.lin_pre = LinearLayer(width, width_norm, keys[0])
+        self.glu_post = GatedLinearBlock(width_norm, width_norm, num_head, dim_head, keep_groups=True, key=keys[1])
 
         print("##params[virt]:", _count_params(self))
 
     def __call__(self, x, virt, batch, batch_size, key=None):
-        xx = self.glu_pre(x, key=key)
+        xx = self.lin_pre(x)
         msg = segment_sum(xx, batch, batch_size)
+        msg = msg / jnp.sqrt(jnp.mean(jnp.square(msg), axis=-1, keepdims=True) + EPSILON)
         if virt is None:
             virt = msg
         else:
@@ -296,15 +299,16 @@ class MixerKernel(eqx.Module):
         self.scale = jnp.zeros((len(edge_dims_per_hop) + 1, num_head), dtype=jnp.float32)
 
     def __call__(self, x, virt, edges, batch, batch_size, key=None):
-        # edges is a list of (edge_index, edge_attr, deg, edge_mask) for each hop
+        # edges is a list of (edge_index, edge_attr, deg) for each hop
         keys = _split_or_none(key, len(self.conv) + 1)
-        msgs = [conv(x, deg, idx, attr, mask, key=keys[i]) for i, (conv, (idx, attr, deg, mask)) in enumerate(zip(self.conv, edges))]
+        msgs = [conv(x, deg, idx, attr, key=keys[i]) for i, (conv, (idx, attr, deg)) in enumerate(zip(self.conv, edges))]
         xx, virt = self.virt(x, virt, batch, batch_size, key=keys[len(self.conv)])
         msgs.append(xx)
         
         # msgs: list of (N, num_head * dim_head)
         # scale: (num_messages, num_head)
-        scale = jax.nn.softplus(self.scale).clip(1/10, 10)
+        scale = jax.nn.softplus(self.scale)
+        scale = _clip_with_grad(scale, 1/ACT_FACTOR, ACT_FACTOR)
         # scale_norm: (num_messages, num_head)
         scale_norm = scale / jnp.sqrt(jnp.sum(jnp.square(scale), axis=0, keepdims=True))
         # Apply per-head scaling: (num_messages, num_head) -> (num_messages, num_head * dim_head)
@@ -315,7 +319,7 @@ class MixerKernel(eqx.Module):
 class HeadKernel(eqx.Module):
     """Readout head: virtual + node pooling → scalar prediction."""
     num_head: int
-    glu_pre:  GatedLinearBlock
+    lin_pre:  LinearLayer
     glu_post: GatedLinearBlock
 
     def __init__(self, width, num_head, dim_head, key=None):
@@ -323,13 +327,14 @@ class HeadKernel(eqx.Module):
         keys = _split_or_none(key, 2)
 
         self.num_head = num_head
-        self.glu_pre  = GatedLinearBlock(width, width_norm, num_head, dim_head, SCALE_EDGE, keep_groups=True, key=keys[0])
-        self.glu_post = GatedLinearBlock(width_norm, 1, num_head*2, dim_head, SCALE_GRAPH, key=keys[1])
+        self.lin_pre  = LinearLayer(width, width_norm, keys[0])
+        self.glu_post = GatedLinearBlock(width_norm, 1, num_head*2, dim_head, key=keys[1])
 
         print("##params[head]:", _count_params(self))
 
     def __call__(self, x, virt, batch, batch_size, key=None):
-        xx = self.glu_pre(x, key=key)
+        xx = self.lin_pre(x)
+        xx = xx / jnp.sqrt(jnp.mean(jnp.square(xx), axis=-1, keepdims=True) + EPSILON)
         yy = segment_sum(xx, batch, batch_size) + virt
         yy = self.glu_post(yy, key=key) * 1.162127 + 5.689452
         return yy
@@ -375,7 +380,7 @@ class DenseGIN(eqx.Module):
         for i in range(depth):
             mixs.append(MixerKernel(width, num_head, dim_head, EDGE_DIMS_PER_HOP, key=keys[curr]))
             curr += 1
-            meta.append(MetaFormerBlock(width, num_head, dim_head, SCALE_NODE, key=keys[curr]))
+            meta.append(MetaFormerBlock(width, num_head, dim_head, key=keys[curr]))
             curr += 1
         self.mixs = tuple(mixs)
         self.meta = tuple(meta)
@@ -430,11 +435,11 @@ class DenseGIN(eqx.Module):
         for suffix in EDGE_SUFFIXES:
             edge_index = batch[f'edge{suffix}_index']   # (2, E_pad)
             edge_attr  = batch[f'edge{suffix}_feat']    # (E_pad, num_bond_features)
-            edge_mask  = batch[f'edge{suffix}_batch'] > 0    # (E_pad,)
-            deg = segment_sum(jnp.ones((edge_mask.shape[0], 1), dtype=edge_index.dtype), edge_index[1], num_nodes).squeeze(-1).clip(1, None)
-            edges.append((edge_index, edge_attr, deg, edge_mask))
+            deg = segment_sum(jnp.ones((batch[f'edge{suffix}_batch'].shape[0], 1), dtype=edge_index.dtype), edge_index[1], num_nodes).squeeze(-1).clip(1, None)
+            edges.append((edge_index, edge_attr, deg))
         return edges
 
 
 def get_model(key):
-    return DenseGIN(depth=5, width=256, num_head=16, dim_head=32, key=key)
+    return DenseGIN(depth=5, width=256, num_head=8, dim_head=32, key=key)
+

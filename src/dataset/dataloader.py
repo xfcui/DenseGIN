@@ -8,7 +8,7 @@ import h5py
 import numpy as np
 from typing import Dict, Iterable, Sequence
 
-PAD_TO_MULTIPLE = 1024
+PAD_TO_MULTIPLE = 2048
 
 
 def _load_split_indices(split_path: Path, split_name: str, num_graphs: int) -> np.ndarray:

@@ -173,7 +173,7 @@ def eval_step(model, batch):
 
 
 def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
-          model_save_path="models/best_model.eqx",
+          model_save_path="results/best_model.eqx",
           scheduler_period=None):
     """
     Train the GNN model on PCQM4Mv2 dataset.
@@ -182,7 +182,7 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
         num_epochs: Number of training epochs
         batch_size: Batch size
         learning_rate: Learning rate (peak learning rate if using warmup schedule)
-        model_save_path: Path to save the best model. Default: "models/best_model.eqx".
+        model_save_path: Path to save the best model. Default: "results/best_model.eqx".
         scheduler_period: Period k for geometric LR scheduler. If None, use constant LR.
 
     Returns:
@@ -291,11 +291,11 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch_size', type=int, default=512)
+    parser.add_argument('--batch_size', type=int, default=2**10-1)
     parser.add_argument('--learning_rate', type=float, default=3e-3)
     parser.add_argument('--weight_decay', type=float, default=2e-2)
     parser.add_argument('--scheduler_period', type=int, default=8, help='Period for geometric LR scheduler')
-    parser.add_argument('--model_save_path', type=str, default="models/best_model.eqx", help='Path to save the best model')
+    parser.add_argument('--model_save_path', type=str, default="results/best_model.eqx", help='Path to save the best model')
     args = parser.parse_args()
 
     train(
@@ -306,4 +306,3 @@ if __name__ == "__main__":
         model_save_path=args.model_save_path,
         scheduler_period=args.scheduler_period
     )
-
