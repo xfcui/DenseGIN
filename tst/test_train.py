@@ -228,11 +228,11 @@ class TrainLoopTest(TestCase):
         def fake_train_step(model, opt_state, batch, optimizer, key):
             calls["train_step"] += 1
             updated_model = eqx.tree_at(lambda m: m.weight, model, model.weight + 1.0)
-            return updated_model, opt_state, jnp.mean(batch["labels"])
+            return updated_model, opt_state, jnp.sum(batch["labels"]) / batch["labels"].shape[0]
 
         def fake_eval_step(model, batch):
             calls["eval_step"] += 1
-            return jnp.mean(batch["labels"])
+            return jnp.sum(batch["labels"]) / batch["labels"].shape[0]
 
         def fake_serialize(path, model):
             calls["saved"].append((str(path), model))

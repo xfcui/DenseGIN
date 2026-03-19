@@ -281,13 +281,17 @@ class MixerKernel(eqx.Module):
     num_head: int = eqx.field(static=True)
     dim_head: int = eqx.field(static=True)
     conv: tuple
-    virt: VirtKernel
+    virt: VirtKernel | None
+    use_virt: bool = eqx.field(static=True)
     scale: jnp.ndarray
 
-    def __init__(self, width, num_head, dim_head, edge_dims_per_hop, key=None):
-        keys = _split_or_none(key, len(edge_dims_per_hop) + 2)
+    def __init__(self, width, num_head, dim_head, edge_dims_per_hop, use_virt=True, key=None):
+        num_hops = len(edge_dims_per_hop)
+        num_virt_keys = 1 if use_virt else 0
+        keys = _split_or_none(key, num_hops + num_virt_keys)
         self.num_head = num_head
         self.dim_head = dim_head
+        self.use_virt = use_virt
         self.conv = tuple(
             ConvKernel(
                 width,
@@ -297,15 +301,19 @@ class MixerKernel(eqx.Module):
                 edge_dims_per_hop[i][1],
                 key=keys[i],
             )
-            for i in range(len(edge_dims_per_hop))
+            for i in range(num_hops)
         )
-        self.virt = VirtKernel(width, num_head, dim_head, key=keys[-2])
+        if self.use_virt:
+            self.virt = VirtKernel(width, num_head, dim_head, key=keys[-1])
+        else:
+            self.virt = None
         # scale shape: (num_messages, num_head)
-        self.scale = jnp.zeros((len(edge_dims_per_hop) + 1, num_head), dtype=jnp.float32)
+        self.scale = jnp.zeros((num_hops + num_virt_keys, num_head), dtype=jnp.float32)
 
     def __call__(self, x, virt, edges, batch, batch_size, key=None):
-        """Run multi-hop convolutions, then mix with virtual-node message."""
-        keys = _split_or_none(key, len(self.conv) + 1)
+        """Run multi-hop convolutions, then mix with virtual-node message if enabled."""
+        num_virt = 1 if self.use_virt else 0
+        keys = _split_or_none(key, len(self.conv) + num_virt)
 
         scale = jax.nn.softplus(self.scale)
         scale = _clip_with_grad(scale, 1/MINMAX_RATIO, MINMAX_RATIO)
@@ -313,8 +321,10 @@ class MixerKernel(eqx.Module):
         scale = jnp.repeat(scale, self.dim_head, axis=-1)
         
         msg = [conv(x, deg, idx, attr, key=keys[i]) for i, (conv, (idx, attr, deg)) in enumerate(zip(self.conv, edges))]
-        ext, virt = self.virt(x, virt, batch, batch_size, key=keys[-1])
-        msg = sum(s * m for s, m in zip(scale, msg + [ext]))
+        if self.use_virt:
+            ext, virt = self.virt(x, virt, batch, batch_size, key=keys[-1])
+            msg = msg + [ext]
+        msg = sum(s * m for s, m in zip(scale, msg))
         return msg, virt
 
 class HeadKernel(eqx.Module):
@@ -337,6 +347,8 @@ class HeadKernel(eqx.Module):
         """Readout head: sum pool, normalize, fuse virtual node, and project."""
         msg = self.lin_pre(x)
         msg = segment_sum(msg, batch, batch_size)
+        if virt is None:
+            virt = jnp.zeros_like(msg)
         msg = msg / jnp.sqrt(jnp.mean(jnp.square(msg), axis=-1, keepdims=True) + EPSILON) + virt
         msg = self.glu_post(msg, key=key)
         return msg * 1.162127 + 5.689452
@@ -380,12 +392,12 @@ class DenseGIN(eqx.Module):
         
         curr = 0
         self.atom_embed = EmbedLayer(NODE_FEAT_TOTAL_VOCAB, len(NODE_FEAT_VOCAB_SIZES), width, keys[curr]); curr += 1
-        self.atom_pos = GatedLinearBlock(EMBED_POS, width, num_head // 2, dim_head, 1, key=keys[curr]); curr += 1
+        self.atom_pos = GatedLinearBlock(EMBED_POS, width, num_head, dim_head, 1, key=keys[curr]); curr += 1
 
         mixs = []
         meta = []
         for i in range(depth):
-            mixs.append(MixerKernel(width, num_head, dim_head, EDGE_DIMS_PER_HOP, key=keys[curr]))
+            mixs.append(MixerKernel(width, num_head, dim_head, EDGE_DIMS_PER_HOP, use_virt=i>0, key=keys[curr]))
             curr += 1
             meta.append(MetaFormerBlock(width, num_head, dim_head, key=keys[curr]))
             curr += 1

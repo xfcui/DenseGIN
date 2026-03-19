@@ -151,7 +151,9 @@ def loss_fn(model, batch, key):
 
     # MAE with threshold mask to ignore near-zero residuals (numerical noise)
     loss = jnp.abs(preds - batch['labels'])
-    loss = jnp.mean(loss, where=loss > 2e-2)
+    mask = loss > 2e-2
+    loss = jnp.where(mask, loss, 0.0)
+    loss = jnp.sum(loss) / jnp.sum(mask.astype(loss.dtype))
     jax.debug.callback(check_nan, loss)
     return loss
 
@@ -291,7 +293,7 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch_size', type=int, default=2**10-1)
+    parser.add_argument('--batch_size', type=int, default=2**10)
     parser.add_argument('--learning_rate', type=float, default=3e-3)
     parser.add_argument('--weight_decay', type=float, default=2e-2)
     parser.add_argument('--scheduler_period', type=int, default=8, help='Period for geometric LR scheduler')
@@ -300,7 +302,7 @@ if __name__ == "__main__":
 
     train(
         num_epochs=args.scheduler_period**2,
-        batch_size=args.batch_size,
+        batch_size=args.batch_size-1,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         model_save_path=args.model_save_path,
