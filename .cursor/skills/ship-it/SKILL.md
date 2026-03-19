@@ -1,12 +1,12 @@
 ---
 name: ship-it
-description: "Run final ship checks for repository changes by executing all tests, fixing blocking regressions, and preparing a clean commit and push. Use when a user asks to run tests, fix issues, and ship/push changes."
+description: "Update test cases to match the current codebase, run the full suite, fix test failures, and prepare a clean commit and push. Source code is only touched to fix genuine bugs. Use when a user asks to run tests, fix issues, and ship/push changes."
 ---
 
 # Ship It
 
 ## Purpose and scope
-Use when the user asks to finalize, ship, or push work. The skill synchronizes tests with the current codebase, ensures adequate coverage, runs and fixes tests, then commits and pushes.
+Use when the user asks to finalize, ship, or push work. The skill updates test cases to agree with the current codebase, ensures adequate coverage, runs and fixes tests, then commits and pushes. Source code is treated as the ground truth and is never modified unless a genuine bug is found.
 
 ## Trigger conditions
 - The user explicitly asks to run tests.
@@ -22,7 +22,7 @@ Use when the user asks to finalize, ship, or push work. The skill synchronizes t
 3. Read every test file under `tst/` and compare against the source APIs found above:
    - Identify stale imports, renamed symbols, removed parameters, and changed signatures.
    - Identify references to old batch-dict keys or deprecated helper functions.
-4. Fix every mismatch found in step 3 — update imports, call sites, assertions, and helper factories so tests agree with the current source code.
+4. Fix every mismatch found in step 3 — update imports, call sites, assertions, and helper factories **in the test files only** so tests agree with the current source code. Do not modify source code to satisfy outdated tests.
 
 ### Phase 2 — Ensure sufficient test coverage
 
@@ -45,7 +45,7 @@ Use when the user asks to finalize, ship, or push work. The skill synchronizes t
    ```
 9. If any test fails:
    a. Read the traceback. Determine if the fault is in a test or in source code.
-   b. Fix the fault with a minimal edit; prefer fixing the source only when the test expectation is correct and the source is genuinely wrong. Otherwise, fix the test.
+   b. Fix the **test** with a minimal edit. Only fix source code when there is a genuine bug (e.g. crash, wrong computation, broken invariant). Never change source code merely to make a test pass — update the test instead.
    c. Re-run only the failed test file:
       ```
       python -m pytest tst/<file>.py -q --tb=short 2>&1
@@ -77,5 +77,6 @@ Use when the user asks to finalize, ship, or push work. The skill synchronizes t
 - Do not revert unrelated changes outside the requested scope.
 - Do not discard or force-push unless explicitly requested.
 - Do not commit incomplete or partially tested partial fixes.
-- When fixing a test failure, prefer the smallest edit that makes the test correct and passing.
+- When fixing a test failure, prefer the smallest edit **to the test** that makes it correct and passing.
+- Only modify source code to fix genuine bugs (crashes, incorrect results, broken invariants) — never to accommodate stale test expectations.
 - Do not remove existing passing tests unless their tested behavior has been intentionally removed from the source.

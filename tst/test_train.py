@@ -30,8 +30,7 @@ to_jax_batch = TRAIN.to_jax_batch
 loss_fn = TRAIN.loss_fn
 train_step = TRAIN.train_step
 eval_step = TRAIN.eval_step
-get_scheduled_lr = TRAIN.get_scheduled_lr
-get_scheduled_wd = TRAIN.get_scheduled_wd
+get_scheduled_hparams = TRAIN.get_scheduled_hparams
 _resolve_dataset_root = TRAIN._resolve_dataset_root
 get_jax_dataloader = TRAIN.get_jax_dataloader
 
@@ -52,10 +51,14 @@ class _AffineModel(eqx.Module):
 class TrainUtilityTest(TestCase):
     def test_scheduled_lr_is_piecewise(self) -> None:
         base_lr = 1.0
+        base_wd = 0.0
         k = 4
-        self.assertEqual(get_scheduled_lr(0.0, k, base_lr), 0.0)
-        self.assertAlmostEqual(get_scheduled_lr(2.0, k, base_lr), 0.5)
-        self.assertAlmostEqual(get_scheduled_lr(4.0, k, base_lr), base_lr)
+        lr, wd = get_scheduled_hparams(0.0, k, base_lr, base_wd)
+        self.assertEqual(lr, 0.0)
+        lr, wd = get_scheduled_hparams(2.0, k, base_lr, base_wd)
+        self.assertAlmostEqual(lr, 0.5)
+        lr, wd = get_scheduled_hparams(4.0, k, base_lr, base_wd)
+        self.assertAlmostEqual(lr, base_lr)
 
         gr = (1 + math.sqrt(5)) / 2
         t = 0.5
@@ -63,18 +66,23 @@ class TrainUtilityTest(TestCase):
         lr_start = base_lr / gr ** (period_one - 1)
         lr_end = lr_start / gr ** 2
         expected = lr_end + 0.5 * (lr_start - lr_end) * (1 + math.cos(math.pi * t))
+        lr, wd = get_scheduled_hparams(4.0 + 4.0 * t, k, base_lr, base_wd)
         self.assertAlmostEqual(
-            get_scheduled_lr(4.0 + 4.0 * t, k, base_lr),
+            lr,
             expected,
             places=12,
         )
 
     def test_scheduled_wd_is_piecewise(self) -> None:
+        base_lr = 0.0
         base_wd = 0.2
         k = 8
-        self.assertEqual(get_scheduled_wd(0.0, k, base_wd), 0.0)
-        self.assertAlmostEqual(get_scheduled_wd(4.0, k, base_wd), base_wd * 0.5)
-        self.assertAlmostEqual(get_scheduled_wd(8.0, k, base_wd), base_wd)
+        lr, wd = get_scheduled_hparams(0.0, k, base_lr, base_wd)
+        self.assertEqual(wd, 0.0)
+        lr, wd = get_scheduled_hparams(4.0, k, base_lr, base_wd)
+        self.assertAlmostEqual(wd, base_wd * 0.5)
+        lr, wd = get_scheduled_hparams(8.0, k, base_lr, base_wd)
+        self.assertAlmostEqual(wd, base_wd)
 
     def test_resolve_dataset_root_handles_processed_layout(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -110,10 +118,15 @@ class TrainUtilityTest(TestCase):
         high_residual_batch = {"labels": jnp.array([[1.0]], dtype=jnp.float32)}
         low_residual_batch = {"labels": jnp.array([[0.005]], dtype=jnp.float32)}
 
+        # High residual: |1.0 - 1.5*1.0| = 0.5 > threshold (0.06), so uses MAE directly
         loss = loss_fn(model, high_residual_batch, key=None)
         np.testing.assert_allclose(np.asarray(loss), np.array(0.5, dtype=np.float32))
-        with self.assertRaises(ValueError):
-            loss_fn(model, low_residual_batch, key=None)
+        
+        # Low residual: |0.005 - 1.5*0.005| = 0.0025 < threshold (0.06), so uses quadratic penalty
+        # loss = (0.0025^2) / 0.06 ≈ 0.000104
+        loss_low = loss_fn(model, low_residual_batch, key=None)
+        expected_low = (0.0025 ** 2) / 0.06
+        np.testing.assert_allclose(np.asarray(loss_low), np.array(expected_low, dtype=np.float32), rtol=1e-5)
 
 
 class TrainStepTest(TestCase):
