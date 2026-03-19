@@ -50,55 +50,39 @@ def make_optimizer(
     )
 
 
-def get_scheduled_lr(epoch_fractional: float, k: int, learning_rate: float) -> float:
-    """Return learning rate for a given fractional epoch under the geometric period schedule.
+def get_scheduled_hparams(
+    epoch_fractional: float,
+    k: int,
+    learning_rate: float,
+    weight_decay: float,
+) -> tuple[float, float]:
+    """Return scheduled learning rate and weight decay for a fractional epoch.
 
     Args:
         epoch_fractional: Current fractional epoch (e.g., epoch + batch_idx / steps_per_epoch).
         k: Period length in epochs.
         learning_rate: Peak learning rate (period-1 maximum).
+        weight_decay: Target weight decay.
 
     Returns:
-        Learning rate for this step.
+        Tuple of (learning_rate, weight_decay) for this step.
     """
     gr = (1 + math.sqrt(5)) / 2
     period = int(epoch_fractional // k)  # 0-indexed period number
     t = (epoch_fractional % k) / k       # fractional position within period [0, 1)
 
     if period == 0:
-        # Linear warm-up: 0 → learning_rate
-        return learning_rate * t
+        current_lr = learning_rate * t
+        current_wd = weight_decay * t
     else:
         # Cosine decay within period i (1-indexed i = period+1, maps to i-2 = period-1)
         lr_start = learning_rate / gr ** (period - 1)
         lr_end = lr_start / gr ** 2
         # Cosine annealing from lr_start down to lr_end
-        return lr_end + 0.5 * (lr_start - lr_end) * (1 + math.cos(math.pi * t))
+        current_lr = lr_end + 0.5 * (lr_start - lr_end) * (1 + math.cos(math.pi * t))
+        current_wd = weight_decay
 
-
-def get_scheduled_wd(epoch_fractional: float, k: int, weight_decay: float) -> float:
-    """Return weight decay for a given fractional epoch.
-
-    During period 0, linear increase from 0 to weight_decay.
-    Following periods, remain constant at weight_decay.
-
-    Args:
-        epoch_fractional: Current fractional epoch.
-        k: Period length in epochs.
-        weight_decay: Target weight decay.
-
-    Returns:
-        Weight decay for this step.
-    """
-    period = int(epoch_fractional // k)
-    t = (epoch_fractional % k) / k
-
-    if period == 0:
-        # Linear increase: 0 → weight_decay
-        return weight_decay * t
-    else:
-        # Constant
-        return weight_decay
+    return current_lr, current_wd
 
 
 def _resolve_dataset_root(hdf5_path: str | Path) -> Path:
@@ -140,20 +124,20 @@ def to_jax_batch(batch):
     return converted
 
 
-def loss_fn(model, batch, key):
+def loss_fn(model, batch, key, threshold=6e-2):
     preds = model(batch, training=(key is not None), key=key)
     preds = preds.squeeze(-1)  # (B, 1) -> (B,)
+
+    # MAE with threshold mask to ignore near-zero residuals (numerical noise)
+    loss = jnp.abs(preds - batch['labels'])
+    loss = jnp.where(loss > threshold, loss, loss**2 / threshold)
+    loss = jnp.mean(loss)
 
     # NaN detection via debug.callback: works inside JIT without breaking compilation
     def check_nan(x):
         if jnp.isnan(x):
             raise ValueError("Loss is NaN")
 
-    # MAE with threshold mask to ignore near-zero residuals (numerical noise)
-    loss = jnp.abs(preds - batch['labels'])
-    mask = loss > 2e-2
-    loss = jnp.where(mask, loss, 0.0)
-    loss = jnp.sum(loss) / jnp.sum(mask.astype(loss.dtype))
     jax.debug.callback(check_nan, loss)
     return loss
 
@@ -239,8 +223,9 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
             # Update learning rate if scheduler is enabled
             if scheduler_period is not None:
                 epoch_fractional = epoch + batch_idx / steps_per_epoch
-                current_lr = get_scheduled_lr(epoch_fractional, scheduler_period, learning_rate)
-                current_wd = get_scheduled_wd(epoch_fractional, scheduler_period, weight_decay)
+                current_lr, current_wd = get_scheduled_hparams(
+                    epoch_fractional, scheduler_period, learning_rate, weight_decay
+                )
                 # Update optax state for learning rate and weight decay
                 for i in range(len(opt_state)):
                     if hasattr(opt_state[i], 'hyperparams'):
@@ -272,10 +257,9 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
         
         avg_valid_loss = total_valid_loss / num_valid_batches
 
-        current_lr = get_scheduled_lr(epoch + 1.0, scheduler_period, learning_rate) \
-            if scheduler_period is not None else learning_rate
-        current_wd = get_scheduled_wd(epoch + 1.0, scheduler_period, weight_decay) \
-            if scheduler_period is not None else weight_decay
+        current_lr, current_wd = get_scheduled_hparams(
+            epoch + 1.0, scheduler_period, learning_rate, weight_decay
+        ) if scheduler_period is not None else (learning_rate, weight_decay)
         msg = f"Epoch {epoch} | LR: {current_lr:.2e} | WD: {current_wd:.2e} | Train Loss: {avg_train_loss:.4f} | Valid Loss: {avg_valid_loss:.4f}"
         
         if avg_valid_loss < best_valid_loss:
@@ -293,7 +277,7 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch_size', type=int, default=2**10)
+    parser.add_argument('--batch_size', type=int, default=256)
     parser.add_argument('--learning_rate', type=float, default=3e-3)
     parser.add_argument('--weight_decay', type=float, default=2e-2)
     parser.add_argument('--scheduler_period', type=int, default=8, help='Period for geometric LR scheduler')
