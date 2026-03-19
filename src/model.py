@@ -36,16 +36,6 @@ def _count_params(model: eqx.Module) -> int:
     return sum(x.size for x in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_array)))
 
 
-class ActLayer(eqx.Module):
-    bias: jnp.ndarray
-
-    def __init__(self, width, *, key=None):
-        self.bias = jnp.zeros((width,), dtype=jnp.float32)
-
-    def __call__(self, x):
-        return jax.nn.softplus(x + self.bias)
-
-
 def _dropout_act(x, key, act):
     xx = act(x)
     if key is None or DROPOUT <= 0.0: return xx
@@ -81,6 +71,15 @@ class ScaleLayer(eqx.Module):
 
     def __call__(self, x):
         return jnp.exp(self.scale.clip(None, 0)) * x
+
+class ActLayer(eqx.Module):
+    bias: jnp.ndarray
+
+    def __init__(self, width, *, key=None):
+        self.bias = jnp.zeros((width,), dtype=jnp.float32)
+
+    def __call__(self, x):
+        return jax.nn.softplus(x + self.bias)
 
 # PNA: https://arxiv.org/abs/2004.05718
 # Graphormer: https://arxiv.org/abs/2106.05234
