@@ -13,9 +13,10 @@ from dataset import (
     EDGE_FEAT_TOTAL_VOCAB,
 )
 
-DROPOUT    = 0.1
-ACT_FACTOR = 20**.5
-EPSILON    = 1e-6
+DROPOUT         = 0.1
+EPSILON         = 1e-6
+MINMAX_RATIO    = 20**.5
+WIDTH_ACT_SCALE = 4
 
 EMBED_POS  = 12    # RWPE12 only (ignore coord/en/geom auxiliaries)
 EDGE_SUFFIXES = list(EDGE_FEAT_VOCAB_SIZES.keys())
@@ -23,7 +24,6 @@ EDGE_DIMS_PER_HOP = [
     (EDGE_FEAT_TOTAL_VOCAB[suffix], len(EDGE_FEAT_VOCAB_SIZES[suffix]))
     for suffix in EDGE_SUFFIXES
 ]
-SCALE_ACT = 4
 
 
 def _split_or_none(key, num):
@@ -94,7 +94,7 @@ class ActLayer(eqx.Module):
 
     def __call__(self, x, key=None):
         xx = jax.nn.softplus(x + self.bias)
-        xx = _clip_with_grad(xx, 1/ACT_FACTOR, ACT_FACTOR)
+        xx = _clip_with_grad(xx, 1/MINMAX_RATIO, MINMAX_RATIO)
         if key is None or DROPOUT <= 0.0:
             return xx
 
@@ -153,7 +153,7 @@ class GatedLinearBlock(eqx.Module):
 
     def __init__(self, width_in, width_out, num_head, dim_head, keep_groups=False, key=None):
         width_norm = num_head * dim_head
-        width_act  = num_head * dim_head * SCALE_ACT
+        width_act  = num_head * dim_head * WIDTH_ACT_SCALE
         keys = _split_or_none(key, 4)
 
         self.num_head = num_head
@@ -163,10 +163,10 @@ class GatedLinearBlock(eqx.Module):
         self.act = ActLayer(width_act)
         if keep_groups:
             assert width_out % num_head == 0
-            self.kernel = jax.random.normal(keys[2], (num_head, dim_head * SCALE_ACT, width_out // num_head)) / np.sqrt(dim_head * SCALE_ACT)
+            self.kernel = jax.random.normal(keys[2], (num_head, dim_head * WIDTH_ACT_SCALE, width_out // num_head)) / np.sqrt(dim_head * WIDTH_ACT_SCALE)
             self.linear = None
         else:
-            self.kernel = jax.random.normal(keys[2], (num_head, dim_head * SCALE_ACT, dim_head)) / np.sqrt(dim_head * SCALE_ACT)
+            self.kernel = jax.random.normal(keys[2], (num_head, dim_head * WIDTH_ACT_SCALE, dim_head)) / np.sqrt(dim_head * WIDTH_ACT_SCALE)
             self.linear = LinearLayer(width_norm, width_out, keys[3])
 
     def __call__(self, x, y=None, gate_bias=None, value_bias=None, key=None):
@@ -308,7 +308,7 @@ class MixerKernel(eqx.Module):
         # msgs: list of (N, num_head * dim_head)
         # scale: (num_messages, num_head)
         scale = jax.nn.softplus(self.scale)
-        scale = _clip_with_grad(scale, 1/ACT_FACTOR, ACT_FACTOR)
+        scale = _clip_with_grad(scale, 1/MINMAX_RATIO, MINMAX_RATIO)
         # scale_norm: (num_messages, num_head)
         scale_norm = scale / jnp.sqrt(jnp.sum(jnp.square(scale), axis=0, keepdims=True))
         # Apply per-head scaling: (num_messages, num_head) -> (num_messages, num_head * dim_head)
