@@ -1,9 +1,9 @@
 ---
-name: create-skill-tester
+name: ship-it
 description: Demonstrates and validates the `/create-skill` workflow for creating project-level Cursor skills. Use when testing skill authoring, naming, and structure for `.cursor/skills` assets.
 ---
 
-# Create-skill Tester
+# Ship-It
 
 ## Purpose
 
