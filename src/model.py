@@ -240,7 +240,7 @@ class ConvKernel(eqx.Module):
         edge_idx:  ``(2, E_pad)`` global node indices
         edge_attr: ``(E_pad, num_bond_features)`` int32 edge features
         """
-        msg = x[edge_idx[1]] - x[edge_idx[0]]
+        msg = x[edge_idx[0]] - x[edge_idx[1]]
         msg = self.lin_pre(msg) \
             + jnp.sum(msg * self.embed_edge(edge_attr), axis=-1, keepdims=True) \
             @ _clip_with_grad(jax.nn.softplus(self.scale), 1e-2, 1)

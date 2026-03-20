@@ -191,6 +191,45 @@ class TrainLoopTest(TestCase):
         self.assertTrue(captured["shuffle"])
         self.assertFalse(captured["drop_last"])
 
+    def test_train_uses_doubled_batch_size_for_valid_dataloader(self) -> None:
+        recorded: list[tuple[str, int, bool, bool]] = []
+
+        class FakeLoader:
+            def __iter__(self):
+                return iter([{"labels": np.array([1.0], dtype=np.float32)}])
+
+            def __len__(self):
+                return 1
+
+        def capture_loaders(
+            hdf5_path, split, batch_size, shuffle, drop_last=False, *args, **kwargs
+        ):
+            recorded.append((split, batch_size, shuffle, drop_last))
+            return FakeLoader()
+
+        with TemporaryDirectory() as temp_dir:
+            with (
+                patch.object(TRAIN, "get_jax_dataloader", capture_loaders),
+                patch.object(TRAIN, "get_model", lambda _key: _AffineModel()),
+                patch.object(TRAIN.eqx, "tree_serialise_leaves", lambda path, model: None),
+            ):
+                TRAIN.train(
+                    num_epochs=1,
+                    batch_size=9,
+                    learning_rate=1e-3,
+                    weight_decay=0.0,
+                    model_save_path=str(Path(temp_dir) / "best.eqx"),
+                    scheduler_period=None,
+                )
+
+        self.assertEqual(
+            recorded,
+            [
+                ("train", 9, True, True),
+                ("valid", 18, False, False),
+            ],
+        )
+
     def test_train_loop_uses_patched_step_and_saves_best(self) -> None:
         class FakeLoader:
             def __init__(self, batches: list[dict[str, np.ndarray]], expected_batch_size: int):

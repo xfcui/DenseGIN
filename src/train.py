@@ -185,7 +185,7 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
     valid_loader = get_jax_dataloader(
         hdf5_path=hdf5_path,
         split='valid',
-        batch_size=batch_size,
+        batch_size=batch_size*2,
         shuffle=False,
         drop_last=False,
     )
@@ -261,7 +261,7 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
             epoch + 1.0, scheduler_period, learning_rate, weight_decay
         ) if scheduler_period is not None else (learning_rate, weight_decay)
         msg = f"Epoch {epoch} | LR: {current_lr:.2e} | WD: {current_wd:.2e} | Train Loss: {avg_train_loss:.4f} | Valid Loss: {avg_valid_loss:.4f}"
-        
+
         if avg_valid_loss < best_valid_loss:
             best_valid_loss = avg_valid_loss
             msg += " *"
@@ -277,7 +277,7 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch_size', type=int, default=256)
+    parser.add_argument('--batch_size', type=int, default=512)
     parser.add_argument('--learning_rate', type=float, default=3e-3)
     parser.add_argument('--weight_decay', type=float, default=2e-2)
     parser.add_argument('--scheduler_period', type=int, default=8, help='Period for geometric LR scheduler')
