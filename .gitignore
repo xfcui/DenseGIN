@@ -1,7 +1,7 @@
 # Data and experiment artifacts
-dataset/
-results/
-checkpoints/
+/dataset/
+/results/
+/checkpoints/
 *.h5
 *.hdf5
 *.pkl
