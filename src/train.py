@@ -15,8 +15,11 @@ warnings.filterwarnings('ignore', category=UserWarning, module='outdated')
 warnings.filterwarnings('ignore', category=DeprecationWarning, module='pkg_resources')
 
 import math
+from typing import Any
+
 import jax
 import jax.numpy as jnp
+import jax.tree_util as jtu
 import optax
 import equinox as eqx
 from tqdm import tqdm
@@ -24,10 +27,64 @@ from dataset import PCQMDataset, PCQMDataloader
 from model import get_model
 
 
+def _attr_segment_names(path: tuple[Any, ...]) -> tuple[str, ...]:
+    """Attribute names along a JAX pytree path (ignore sequence/dict keys)."""
+    out: list[str] = []
+    for k in path:
+        if isinstance(k, jtu.GetAttrKey):
+            out.append(k.name)
+    return tuple(out)
+
+
+def lr_multiplier_for_param_path(path: tuple[Any, ...]) -> float:
+    """Per-parameter LR scale relative to the global optimizer LR.
+
+    - 0.5×: atom embedding table and atom position encoder (``atom_embed``, ``atom_pos``).
+    - 2×: ConvKernel bond/degree embedding tensors; all HeadKernel parameters.
+    """
+    names = _attr_segment_names(path)
+    if not names:
+        return 1.0
+    if names[0] in ("atom_embed", "atom_pos"):
+        return 0.5
+    if names[0] == "head":
+        return 2.0
+    if "conv" in names:
+        if "embed_lora" in names:
+            return 2.0
+        if names[-1] == "embeddings" and ("embed_edge" in names or "embed_deg" in names):
+            return 2.0
+    return 1.0
+
+
+def per_param_lr_multiplier_tree(params: Any) -> Any:
+    """PyTree matching ``params`` with a positive float LR multiplier per array leaf."""
+    return jtu.tree_map_with_path(
+        lambda path, leaf: lr_multiplier_for_param_path(path),
+        params,
+    )
+
+
+def _scale_updates_by_lr_multipliers(multipliers: Any) -> optax.GradientTransformation:
+    """Multiply each update leaf by the corresponding scalar (fixed multipliers)."""
+
+    def init_fn(params):
+        del params
+        return optax.EmptyState()
+
+    def update_fn(updates, state, params=None):
+        del params
+        scaled = jtu.tree_map(lambda u, m: u * m, updates, multipliers)
+        return scaled, state
+
+    return optax.GradientTransformation(init_fn, update_fn)
+
+
 def make_optimizer(
     learning_rate: float,
     weight_decay: float,
     mask,
+    lr_multiplier_tree,
 ) -> optax.GradientTransformation:
     """Custom Adan-based optimizer with weight decay.
 
@@ -38,6 +95,8 @@ def make_optimizer(
         learning_rate: Global learning rate (scalar or schedule).
         weight_decay: L2 regularisation coefficient.
         mask: Optional pytree mask for weight_decay.
+        lr_multiplier_tree: PyTree matching trainable params; each leaf is a positive
+            float factor applied before ``scale_by_learning_rate``.
 
     Returns:
         An optax.GradientTransformation implementing the optimizer chain.
@@ -47,6 +106,7 @@ def make_optimizer(
         optax.scale_by_adan(),
         optax.add_decayed_weights(weight_decay=weight_decay, mask=mask),
         optax.scale_by_learning_rate(learning_rate),
+        _scale_updates_by_lr_multipliers(lr_multiplier_tree),
     )
 
 
@@ -195,13 +255,20 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
     model_key, train_key = jax.random.split(key)
     model = get_model(model_key)
 
-    mask = jax.tree_util.tree_map_with_path(
+    params = eqx.filter(model, eqx.is_array)
+    mask = jtu.tree_map_with_path(
         lambda path, _: path[-1].name == "kernel",
-        eqx.filter(model, eqx.is_array)
+        params,
     ) if weight_decay > 0.0 else None
+    lr_mult_tree = per_param_lr_multiplier_tree(params)
 
     print(f"Using Adan optimizer with lr={learning_rate} and wd={weight_decay}")
-    optimizer = make_optimizer(learning_rate=learning_rate, weight_decay=weight_decay, mask=mask)
+    optimizer = make_optimizer(
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+        mask=mask,
+        lr_multiplier_tree=lr_mult_tree,
+    )
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
     print()
     

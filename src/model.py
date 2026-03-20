@@ -229,7 +229,7 @@ class ConvKernel(eqx.Module):
         keys = _split_or_none(key, 4)
 
         self.embed_lora = jnp.zeros((1, width_norm), dtype=jnp.float32)
-        self.embed_edge = EmbedLayer(edge_total_vocab, edge_num_features, width, keys[0], init_std=0.02)
+        self.embed_edge = EmbedLayer(edge_total_vocab, edge_num_features, width, keys[0], init_std=0.01)
         self.embed_deg  = EmbedLayer(6, 1, width_norm, keys[1], init_std=0.1)
         self.lin_pre    = LinearLayer(width, width_norm, keys[2])
         self.glu_post   = GatedLinearBlock(width_norm, width_norm, num_head, dim_head, keep_groups=True, key=keys[3])
@@ -241,7 +241,7 @@ class ConvKernel(eqx.Module):
         edge_idx:  ``(2, E_pad)`` global node indices
         edge_attr: ``(E_pad, num_bond_features)`` int32 edge features
         """
-        msg = x[edge_idx[0]] - x[edge_idx[1]]
+        msg = x[edge_idx[0]] + x[edge_idx[1]]  # TODO: optimize this
         msg = self.lin_pre(msg) + jnp.sum(msg * self.embed_edge(edge_attr), axis=-1, keepdims=True) @ self.embed_lora
         msg = segment_sum(msg, edge_idx[1], len(x))
         msg = self.glu_post(msg, gate_bias=self.embed_deg(deg[:, None]), key=key)

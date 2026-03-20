@@ -13,6 +13,7 @@ import importlib.util
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import jax.tree_util as jtu
 import numpy as np
 import optax
 
@@ -33,6 +34,9 @@ eval_step = TRAIN.eval_step
 get_scheduled_hparams = TRAIN.get_scheduled_hparams
 _resolve_dataset_root = TRAIN._resolve_dataset_root
 get_jax_dataloader = TRAIN.get_jax_dataloader
+lr_multiplier_for_param_path = TRAIN.lr_multiplier_for_param_path
+per_param_lr_multiplier_tree = TRAIN.per_param_lr_multiplier_tree
+make_optimizer = TRAIN.make_optimizer
 
 
 class _AffineModel(eqx.Module):
@@ -49,6 +53,38 @@ class _AffineModel(eqx.Module):
 
 
 class TrainUtilityTest(TestCase):
+    def test_lr_multiplier_for_param_path_rules(self) -> None:
+        GK = jtu.GetAttrKey
+        f = lr_multiplier_for_param_path
+        self.assertEqual(f((GK("atom_embed"), GK("embeddings"))), 0.5)
+        self.assertEqual(f((GK("atom_pos"), GK("kernel"))), 0.5)
+        self.assertEqual(f((GK("head"), GK("lin"), GK("kernel"))), 2.0)
+        self.assertEqual(f((GK("conv"), GK("0"), GK("embed_lora"))), 2.0)
+        self.assertEqual(f((GK("conv"), GK("0"), GK("embed_edge"), GK("embeddings"))), 2.0)
+        self.assertEqual(f((GK("conv"), GK("0"), GK("lin_pre"), GK("kernel"))), 1.0)
+        self.assertEqual(f((GK("other"),)), 1.0)
+
+    def test_per_param_lr_multiplier_tree_matches_leaves(self) -> None:
+        model = _AffineModel()
+        params = eqx.filter(model, eqx.is_array)
+        mults = per_param_lr_multiplier_tree(params)
+        for m in jtu.tree_leaves(mults):
+            self.assertEqual(float(m), 1.0)
+
+    def test_make_optimizer_applies_lr_multiplier_tree(self) -> None:
+        model = _AffineModel(weight=1.0, bias=0.0)
+        params = eqx.filter(model, eqx.is_array)
+        mults = jtu.tree_map(lambda _: 2.0, params)
+        opt = make_optimizer(learning_rate=0.1, weight_decay=0.0, mask=None, lr_multiplier_tree=mults)
+        state = opt.init(params)
+        grads = jtu.tree_map(lambda x: jnp.ones_like(x), params)
+        updates, _ = opt.update(grads, state, params)
+        for u in jtu.tree_leaves(updates):
+            self.assertTrue(np.isfinite(float(u)))
+        # Same base grads → Adan produces matched steps; 2× LR multiplier applies to both leaves equally.
+        np.testing.assert_allclose(float(updates.weight), float(updates.bias), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(float(jnp.abs(updates.weight)), 0.2, rtol=1e-3)
+
     def test_scheduled_lr_is_piecewise(self) -> None:
         base_lr = 1.0
         base_wd = 0.0
@@ -164,13 +200,25 @@ class TrainLoopTest(TestCase):
                 captured["split_file"] = split_file
 
         class FakeLoader:
-            def __init__(self, dataset, batch_size, shuffle, drop_last, pad_to_multiple=16, seed=None):
+            def __init__(
+                self,
+                dataset,
+                *,
+                batch_size,
+                shuffle,
+                drop_last,
+                indices=None,
+                pad_to_multiple=None,
+                seed=None,
+            ):
                 captured["loader_dataset"] = dataset
                 captured["batch_size"] = batch_size
                 captured["shuffle"] = shuffle
                 captured["drop_last"] = drop_last
                 captured["seed"] = seed
-                captured["pad_to_multiple"] = pad_to_multiple
+                captured["pad_to_multiple"] = (
+                    int(batch_size) * 4 if pad_to_multiple is None else int(pad_to_multiple)
+                )
 
             def __iter__(self):
                 return iter([])
@@ -190,6 +238,7 @@ class TrainLoopTest(TestCase):
         self.assertEqual(captured["batch_size"], 7)
         self.assertTrue(captured["shuffle"])
         self.assertFalse(captured["drop_last"])
+        self.assertEqual(captured["pad_to_multiple"], 28)
 
     def test_train_uses_doubled_batch_size_for_valid_dataloader(self) -> None:
         recorded: list[tuple[str, int, bool, bool]] = []

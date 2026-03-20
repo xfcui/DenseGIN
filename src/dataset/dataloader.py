@@ -8,8 +8,6 @@ import h5py
 import numpy as np
 from typing import Dict, Iterable, Sequence
 
-PAD_TO_MULTIPLE = 2048
-
 
 def _load_split_indices(split_path: Path, split_name: str, num_graphs: int) -> np.ndarray:
     if not split_path.exists():
@@ -43,7 +41,7 @@ class PCQMDataloader:
         batch_size: int = 1,
         shuffle: bool = False,
         drop_last: bool = False,
-        pad_to_multiple: int = PAD_TO_MULTIPLE,
+        pad_to_multiple: int | None = None,
         seed: int | None = None,
     ) -> None:
         if batch_size <= 0:
@@ -52,7 +50,9 @@ class PCQMDataloader:
         self.batch_size = int(batch_size)
         self.shuffle = shuffle
         self.drop_last = drop_last
-        self.pad_to_multiple = pad_to_multiple
+        self.pad_to_multiple = (
+            self.batch_size * 4 if pad_to_multiple is None else int(pad_to_multiple)
+        )
         self.seed = seed
 
         if indices is None:
@@ -130,9 +130,11 @@ def batch_collapse(
     dataset: "PCQMDataset",
     graph_ids: Sequence[int],
     *,
-    pad_to_multiple: int = PAD_TO_MULTIPLE,
+    pad_to_multiple: int | None = None,
 ) -> Dict[str, np.ndarray]:
-    return dataset.batch_collapse(graph_ids, pad_to_multiple=pad_to_multiple)
+    n = len(graph_ids)
+    resolved = (max(1, n) * 4) if pad_to_multiple is None else int(pad_to_multiple)
+    return dataset.batch_collapse(graph_ids, pad_to_multiple=resolved)
 
 
 __all__ = [

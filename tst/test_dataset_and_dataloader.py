@@ -298,6 +298,11 @@ class PCQMDataloaderTestCase(unittest.TestCase):
         loader_drop_last = PCQMDataloader(self.dataset, batch_size=2, drop_last=True)
         self.assertEqual(len(loader_drop_last), 1)
 
+    def test_default_pad_to_multiple_is_four_times_batch_size(self) -> None:
+        for bs in (1, 2, 3, 5):
+            loader = PCQMDataloader(self.dataset, batch_size=bs)
+            self.assertEqual(loader.pad_to_multiple, bs * 4)
+
     def test_iter_and_batching(self) -> None:
         loader = PCQMDataloader(
             self.dataset,
