@@ -218,7 +218,7 @@ class MetaFormerBlock(eqx.Module):
 # GNN-AK: https://openreview.net/forum?id=Mspk_WYKoEH
 class ConvKernel(eqx.Module):
     """Bond-aware graph convolution with degree normalisation."""
-    scale:      jnp.ndarray
+    embed_lora: jnp.ndarray
     embed_edge: EmbedLayer
     embed_deg:  EmbedLayer
     lin_pre:    LinearLayer
@@ -228,7 +228,7 @@ class ConvKernel(eqx.Module):
         width_norm = num_head * dim_head
         keys = _split_or_none(key, 4)
 
-        self.scale      = jnp.zeros((1, width_norm), dtype=jnp.float32)
+        self.embed_lora = jnp.zeros((1, width_norm), dtype=jnp.float32)
         self.embed_edge = EmbedLayer(edge_total_vocab, edge_num_features, width, keys[0], init_std=0.02)
         self.embed_deg  = EmbedLayer(6, 1, width_norm, keys[1], init_std=0.1)
         self.lin_pre    = LinearLayer(width, width_norm, keys[2])
@@ -242,7 +242,7 @@ class ConvKernel(eqx.Module):
         edge_attr: ``(E_pad, num_bond_features)`` int32 edge features
         """
         msg = x[edge_idx[0]] - x[edge_idx[1]]
-        msg = self.lin_pre(msg) + jnp.sum(msg * self.embed_edge(edge_attr), axis=-1, keepdims=True) @ self.scale
+        msg = self.lin_pre(msg) + jnp.sum(msg * self.embed_edge(edge_attr), axis=-1, keepdims=True) @ self.embed_lora
         msg = segment_sum(msg, edge_idx[1], len(x))
         msg = self.glu_post(msg, gate_bias=self.embed_deg(deg[:, None]), key=key)
         return msg
@@ -435,7 +435,7 @@ class DenseGIN(eqx.Module):
             ),
         ))
 
-        x, virt = self.atom_embed(node_feat) + jax.vmap(self.atom_pos)(node_embd) / 4, None
+        x, virt = self.atom_embed(node_feat) + jax.vmap(self.atom_pos)(node_embd) / 10, None
         for i in range(self.depth):
             msg, virt = self.mixs[i](x, virt, edges, graph_id, batch_size, key=keys[2*i])
             x = self.meta[i](x, msg, key=keys[2*i+1])
