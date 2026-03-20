@@ -37,6 +37,9 @@ get_jax_dataloader = TRAIN.get_jax_dataloader
 lr_multiplier_for_param_path = TRAIN.lr_multiplier_for_param_path
 per_param_lr_multiplier_tree = TRAIN.per_param_lr_multiplier_tree
 make_optimizer = TRAIN.make_optimizer
+_make_lr_schedule = TRAIN._make_lr_schedule
+_make_wd_schedule = TRAIN._make_wd_schedule
+_add_scheduled_decayed_weights = TRAIN._add_scheduled_decayed_weights
 
 
 class _AffineModel(eqx.Module):
@@ -58,9 +61,9 @@ class TrainUtilityTest(TestCase):
         f = lr_multiplier_for_param_path
         self.assertEqual(f((GK("atom_embed"), GK("embeddings"))), 0.5)
         self.assertEqual(f((GK("atom_pos"), GK("kernel"))), 0.5)
-        self.assertEqual(f((GK("head"), GK("lin"), GK("kernel"))), 2.0)
-        self.assertEqual(f((GK("conv"), GK("0"), GK("embed_lora"))), 2.0)
-        self.assertEqual(f((GK("conv"), GK("0"), GK("embed_edge"), GK("embeddings"))), 2.0)
+        self.assertEqual(f((GK("head"), GK("lin"), GK("kernel"))), 4.0)
+        self.assertEqual(f((GK("conv"), GK("0"), GK("embed_lora"))), 4.0)
+        self.assertEqual(f((GK("conv"), GK("0"), GK("embed_edge"), GK("embeddings"))), 4.0)
         self.assertEqual(f((GK("conv"), GK("0"), GK("lin_pre"), GK("kernel"))), 1.0)
         self.assertEqual(f((GK("other"),)), 1.0)
 
@@ -84,6 +87,40 @@ class TrainUtilityTest(TestCase):
         # Same base grads → Adan produces matched steps; 2× LR multiplier applies to both leaves equally.
         np.testing.assert_allclose(float(updates.weight), float(updates.bias), rtol=1e-5, atol=1e-5)
         np.testing.assert_allclose(float(jnp.abs(updates.weight)), 0.2, rtol=1e-3)
+
+    def test_jax_schedules_match_get_scheduled_hparams(self) -> None:
+        spe = 100
+        k = 4
+        peak_lr = 1.0
+        peak_wd = 0.2
+        lr_sched = _make_lr_schedule(spe, k, peak_lr)
+        wd_sched = _make_wd_schedule(spe, k, peak_wd)
+        for step in (0, 1, 50, 99, 100, 200, 401):
+            epoch_frac = step / spe
+            lr_py, wd_py = get_scheduled_hparams(epoch_frac, k, peak_lr, peak_wd)
+            c = jnp.array(step, dtype=jnp.int32)
+            lr_jax = float(lr_sched(c))
+            wd_jax = float(wd_sched(c))
+            self.assertAlmostEqual(lr_jax, lr_py, places=6)
+            self.assertAlmostEqual(wd_jax, wd_py, places=6)
+
+    def test_scheduled_decayed_weights_advances_count(self) -> None:
+        params = {"w": jnp.array([2.0, 3.0], dtype=jnp.float32)}
+        grads = {"w": jnp.ones(2, dtype=jnp.float32)}
+
+        def sched(c: jax.Array) -> jax.Array:
+            return jnp.asarray(0.1, dtype=jnp.float32) * c.astype(jnp.float32)
+
+        tx = _add_scheduled_decayed_weights(sched)
+        state = tx.init(params)
+        u1, s1 = tx.update(grads, state, params)
+        np.testing.assert_allclose(np.asarray(u1["w"]), np.array([1.0, 1.0], dtype=np.float32))
+        u2, s2 = tx.update(grads, s1, params)
+        np.testing.assert_allclose(
+            np.asarray(u2["w"]),
+            np.array([1.0, 1.0], dtype=np.float32) + 0.1 * np.array([2.0, 3.0], dtype=np.float32),
+        )
+        self.assertEqual(int(s2.count), 2)
 
     def test_scheduled_lr_is_piecewise(self) -> None:
         base_lr = 1.0

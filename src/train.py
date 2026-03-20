@@ -15,12 +15,14 @@ warnings.filterwarnings('ignore', category=UserWarning, module='outdated')
 warnings.filterwarnings('ignore', category=DeprecationWarning, module='pkg_resources')
 
 import math
+from collections.abc import Callable
 from typing import Any
 
 import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 import optax
+from optax._src import base as optax_base
 import equinox as eqx
 from tqdm import tqdm
 from dataset import PCQMDataset, PCQMDataloader
@@ -40,7 +42,7 @@ def lr_multiplier_for_param_path(path: tuple[Any, ...]) -> float:
     """Per-parameter LR scale relative to the global optimizer LR.
 
     - 0.5×: atom embedding table and atom position encoder (``atom_embed``, ``atom_pos``).
-    - 2×: ConvKernel bond/degree embedding tensors; all HeadKernel parameters.
+    - 4×: ConvKernel bond/degree embedding tensors; all HeadKernel parameters.
     """
     names = _attr_segment_names(path)
     if not names:
@@ -48,12 +50,12 @@ def lr_multiplier_for_param_path(path: tuple[Any, ...]) -> float:
     if names[0] in ("atom_embed", "atom_pos"):
         return 0.5
     if names[0] == "head":
-        return 2.0
+        return 4.0
     if "conv" in names:
         if "embed_lora" in names:
-            return 2.0
+            return 4.0
         if names[-1] == "embeddings" and ("embed_edge" in names or "embed_deg" in names):
-            return 2.0
+            return 4.0
     return 1.0
 
 
@@ -80,9 +82,77 @@ def _scale_updates_by_lr_multipliers(multipliers: Any) -> optax.GradientTransfor
     return optax.GradientTransformation(init_fn, update_fn)
 
 
+def _make_lr_schedule(steps_per_epoch: int, k: int, peak_lr: float) -> Callable[[jax.Array], jax.Array]:
+    """JAX schedule ``count -> lr`` matching :func:`get_scheduled_hparams` (LR branch)."""
+    gr = (1.0 + jnp.sqrt(5.0)) / 2.0
+    k_f = float(k)
+    spe = float(steps_per_epoch)
+
+    def schedule(count: jax.Array) -> jax.Array:
+        epoch_frac = count.astype(jnp.float32) / spe
+        period = jnp.floor(epoch_frac / k_f).astype(jnp.int32)
+        t = jnp.fmod(epoch_frac, k_f) / k_f
+        warmup = peak_lr * t
+        exp = jnp.maximum(period.astype(jnp.float32) - 1.0, 0.0)
+        start = peak_lr / jnp.power(gr, exp)
+        end = start / (gr * gr)
+        cosine = end + 0.5 * (start - end) * (1.0 + jnp.cos(jnp.pi * t))
+        return jnp.where(period == 0, warmup, cosine)
+
+    return schedule
+
+
+def _make_wd_schedule(steps_per_epoch: int, k: int, peak_wd: float) -> Callable[[jax.Array], jax.Array]:
+    """JAX schedule ``count -> weight_decay`` matching :func:`get_scheduled_hparams` (WD branch)."""
+    k_f = float(k)
+    spe = float(steps_per_epoch)
+
+    def schedule(count: jax.Array) -> jax.Array:
+        epoch_frac = count.astype(jnp.float32) / spe
+        period = jnp.floor(epoch_frac / k_f).astype(jnp.int32)
+        t = jnp.fmod(epoch_frac, k_f) / k_f
+        return jnp.where(period == 0, peak_wd * t, peak_wd)
+
+    return schedule
+
+
+def _add_scheduled_decayed_weights(
+    schedule_fn: Callable[[jax.Array], jax.Array],
+    mask: Any | None = None,
+) -> optax.GradientTransformation:
+    """Like ``optax.add_decayed_weights(schedule)`` but increments step count each update.
+
+    Optax's built-in callable ``weight_decay`` path does not advance ``count``, so scheduled
+    decay would be stuck at step 0; this transformation matches the scalar path semantics.
+    """
+
+    def init_fn(params):
+        del params
+        return optax.ScaleByScheduleState(count=jnp.zeros([], jnp.int32))
+
+    def update_fn(updates, state, params):
+        if params is None:
+            raise ValueError(optax_base.NO_PARAMS_MSG)
+        s = schedule_fn(state.count)
+        new_updates = jax.tree.map(
+            lambda g, p: None if g is None else g + s * p,
+            updates,
+            params,
+            is_leaf=lambda x: x is None,
+        )
+        return new_updates, optax.ScaleByScheduleState(
+            count=optax.safe_int32_increment(state.count),
+        )
+
+    inner = optax.GradientTransformation(init_fn, update_fn)
+    if mask is not None:
+        return optax.masked(inner, mask)
+    return inner
+
+
 def make_optimizer(
-    learning_rate: float,
-    weight_decay: float,
+    learning_rate: float | Callable[[jax.Array], jax.Array],
+    weight_decay: float | Callable[[jax.Array], jax.Array],
     mask,
     lr_multiplier_tree,
 ) -> optax.GradientTransformation:
@@ -92,8 +162,8 @@ def make_optimizer(
     first, second, and third-order moments to adapt the step size.
 
     Args:
-        learning_rate: Global learning rate (scalar or schedule).
-        weight_decay: L2 regularisation coefficient.
+        learning_rate: Global learning rate (scalar or schedule ``count -> lr``).
+        weight_decay: L2 regularisation coefficient (scalar or schedule).
         mask: Optional pytree mask for weight_decay.
         lr_multiplier_tree: PyTree matching trainable params; each leaf is a positive
             float factor applied before ``scale_by_learning_rate``.
@@ -101,10 +171,13 @@ def make_optimizer(
     Returns:
         An optax.GradientTransformation implementing the optimizer chain.
     """
+    if callable(weight_decay):
+        wd_transform = _add_scheduled_decayed_weights(weight_decay, mask=mask)
+    else:
+        wd_transform = optax.add_decayed_weights(weight_decay=weight_decay, mask=mask)
     return optax.chain(
-        # Use Adan for adaptive step sizing based on multiple moments
         optax.scale_by_adan(),
-        optax.add_decayed_weights(weight_decay=weight_decay, mask=mask),
+        wd_transform,
         optax.scale_by_learning_rate(learning_rate),
         _scale_updates_by_lr_multipliers(lr_multiplier_tree),
     )
@@ -184,6 +257,12 @@ def to_jax_batch(batch):
     return converted
 
 
+def _check_nan_loss(x: jax.Array) -> None:
+    """Host callback: raise if loss is non-finite."""
+    if jnp.isnan(x):
+        raise ValueError("Loss is NaN")
+
+
 def loss_fn(model, batch, key, threshold=6e-2):
     preds = model(batch, training=(key is not None), key=key)
     preds = preds.squeeze(-1)  # (B, 1) -> (B,)
@@ -193,12 +272,7 @@ def loss_fn(model, batch, key, threshold=6e-2):
     loss = jnp.where(loss > threshold, loss, loss**2 / threshold)
     loss = jnp.mean(loss)
 
-    # NaN detection via debug.callback: works inside JIT without breaking compilation
-    def check_nan(x):
-        if jnp.isnan(x):
-            raise ValueError("Loss is NaN")
-
-    jax.debug.callback(check_nan, loss)
+    jax.debug.callback(_check_nan_loss, loss)
     return loss
 
 
@@ -216,6 +290,42 @@ def train_step(model, opt_state, batch, optimizer, key):
 def eval_step(model, batch):
     """Evaluation without gradients; key=None disables dropout for deterministic inference."""
     return loss_fn(model, batch, key=None)
+
+
+def _train_one_epoch(
+    model,
+    optimizer,
+    opt_state,
+    train_loader,
+    train_key: jax.Array,
+    epoch: int,
+):
+    total_train_loss = 0.0
+    num_train_batches = 0
+    train_pbar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]")
+    for batch in train_pbar:
+        batch = to_jax_batch(batch)
+        train_key, step_key = jax.random.split(train_key)
+        model, opt_state, loss = train_step(model, opt_state, batch, optimizer, step_key)
+        loss_val = loss.item()
+        total_train_loss += loss_val
+        num_train_batches += 1
+        train_pbar.set_postfix(loss=f"{loss_val:.4f}")
+    avg_train_loss = total_train_loss / max(num_train_batches, 1)
+    return model, opt_state, train_key, avg_train_loss
+
+
+def _validate_one_epoch(model, valid_loader, epoch: int) -> float:
+    total_valid_loss = 0.0
+    num_valid_batches = 0
+    valid_pbar = tqdm(valid_loader, desc=f"Epoch {epoch} [Valid]")
+    for batch in valid_pbar:
+        loss = eval_step(model, to_jax_batch(batch))
+        loss_val = loss.item()
+        total_valid_loss += loss_val
+        num_valid_batches += 1
+        valid_pbar.set_postfix(loss=f"{loss_val:.4f}")
+    return total_valid_loss / max(num_valid_batches, 1)
 
 
 def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
@@ -250,6 +360,13 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
         drop_last=False,
     )
 
+    steps_per_epoch = len(train_loader)
+    if scheduler_period is not None:
+        lr_sched = _make_lr_schedule(steps_per_epoch, scheduler_period, learning_rate)
+        wd_sched = _make_wd_schedule(steps_per_epoch, scheduler_period, weight_decay)
+    else:
+        lr_sched, wd_sched = learning_rate, weight_decay
+
     # Initialize model
     key = jax.random.PRNGKey(0)
     model_key, train_key = jax.random.split(key)
@@ -264,77 +381,38 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
 
     print(f"Using Adan optimizer with lr={learning_rate} and wd={weight_decay}")
     optimizer = make_optimizer(
-        learning_rate=learning_rate,
-        weight_decay=weight_decay,
+        learning_rate=lr_sched,
+        weight_decay=wd_sched,
         mask=mask,
         lr_multiplier_tree=lr_mult_tree,
     )
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
     print()
-    
+
     # Track best validation loss
     best_valid_loss = float('inf')
     model_save_path = Path(model_save_path)
     model_save_path.parent.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(num_epochs):
-        # Training loop
-        total_train_loss = 0.0
-        num_train_batches = 0
-        
-        # Get total steps per epoch for fractional epoch calculation
-        steps_per_epoch = len(train_loader)
-        
-        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]")
-        for batch_idx, batch in enumerate(train_pbar):
-            # Update learning rate if scheduler is enabled
-            if scheduler_period is not None:
-                epoch_fractional = epoch + batch_idx / steps_per_epoch
-                current_lr, current_wd = get_scheduled_hparams(
-                    epoch_fractional, scheduler_period, learning_rate, weight_decay
-                )
-                # Update optax state for learning rate and weight decay
-                for i in range(len(opt_state)):
-                    if hasattr(opt_state[i], 'hyperparams'):
-                        if 'learning_rate' in opt_state[i].hyperparams:
-                            opt_state[i].hyperparams['learning_rate'] = current_lr
-                        if 'weight_decay' in opt_state[i].hyperparams:
-                            opt_state[i].hyperparams['weight_decay'] = current_wd
-
-            batch = to_jax_batch(batch)
-            train_key, step_key = jax.random.split(train_key)
-            model, opt_state, loss = train_step(model, opt_state, batch, optimizer, step_key)
-            total_train_loss += loss.item()
-            num_train_batches += 1
-            
-            # Update progress bar with current loss
-            train_pbar.set_postfix(loss=f"{loss.item():.4f}")
-                
-        avg_train_loss = total_train_loss / num_train_batches
-        
-        # Validation loop
-        total_valid_loss = 0.0
-        num_valid_batches = 0
-        valid_pbar = tqdm(valid_loader, desc=f"Epoch {epoch} [Valid]")
-        for batch in valid_pbar:
-            loss = eval_step(model, to_jax_batch(batch))
-            total_valid_loss += loss.item()
-            num_valid_batches += 1
-            valid_pbar.set_postfix(loss=f"{loss.item():.4f}")
-        
-        avg_valid_loss = total_valid_loss / num_valid_batches
+        model, opt_state, train_key, avg_train_loss = _train_one_epoch(
+            model, optimizer, opt_state, train_loader, train_key, epoch,
+        )
+        avg_valid_loss = _validate_one_epoch(model, valid_loader, epoch)
 
         current_lr, current_wd = get_scheduled_hparams(
             epoch + 1.0, scheduler_period, learning_rate, weight_decay
         ) if scheduler_period is not None else (learning_rate, weight_decay)
-        msg = f"Epoch {epoch} | LR: {current_lr:.2e} | WD: {current_wd:.2e} | Train Loss: {avg_train_loss:.4f} | Valid Loss: {avg_valid_loss:.4f}"
+        msg = (
+            f"Epoch {epoch} | LR: {current_lr:.2e} | WD: {current_wd:.2e} | "
+            f"Train Loss: {avg_train_loss:.4f} | Valid Loss: {avg_valid_loss:.4f}"
+        )
 
         if avg_valid_loss < best_valid_loss:
             best_valid_loss = avg_valid_loss
             msg += " *"
             eqx.tree_serialise_leaves(model_save_path, model)
-            
-        # Print combined message at the end of epoch
+
         print(f"\r{msg}")
 
     print(f"Training complete. Best validation loss: {best_valid_loss:.4f}")
