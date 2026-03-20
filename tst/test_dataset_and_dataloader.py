@@ -306,10 +306,12 @@ class PCQMDataloaderTestCase(unittest.TestCase):
             shuffle=False,
             drop_last=False,
             pad_to_multiple=4,
+            seed=42,
         )
         batches = list(loader)
         self.assertEqual(len(batches), 2)
-        self.assertTrue(np.array_equal(np.concatenate([batch["molecule_ids"] for batch in batches]), np.array([2, 0, 1])))
+        # shuffle=False shuffles once at init; seed=42 permutes [2,0,1] -> [1,0,2]
+        self.assertTrue(np.array_equal(np.concatenate([batch["molecule_ids"] for batch in batches]), np.array([1, 0, 2])))
 
         batch_sizes = [batch["batch_n_graphs"] for batch in batches]
         self.assertEqual(batch_sizes, [np.int32(2), np.int32(1)])
@@ -328,6 +330,18 @@ class PCQMDataloaderTestCase(unittest.TestCase):
         self.assertTrue(np.array_equal(order_a, order_b))
         self.assertTrue(np.array_equal(order_a, expected))
 
+    def test_shuffle_false_same_order_on_repeated_passes(self) -> None:
+        loader = PCQMDataloader(self.dataset, batch_size=1, shuffle=False, seed=7, pad_to_multiple=4)
+        order_1 = np.concatenate([b["molecule_ids"] for b in loader])
+        order_2 = np.concatenate([b["molecule_ids"] for b in loader])
+        self.assertTrue(np.array_equal(order_1, order_2))
+
+    def test_shuffle_true_new_order_each_pass(self) -> None:
+        loader = PCQMDataloader(self.dataset, batch_size=1, shuffle=True, seed=0, pad_to_multiple=4)
+        order_1 = np.concatenate([b["molecule_ids"] for b in loader])
+        order_2 = np.concatenate([b["molecule_ids"] for b in loader])
+        self.assertFalse(np.array_equal(order_1, order_2))
+
     def test_get_split(self) -> None:
         loader = PCQMDataloader(
             self.dataset,
@@ -335,12 +349,14 @@ class PCQMDataloaderTestCase(unittest.TestCase):
             shuffle=False,
             drop_last=False,
             pad_to_multiple=4,
+            seed=3,
         )
         split_loader = loader.get_split("train")
         self.assertTrue(np.array_equal(split_loader.indices, np.array([0, 2], dtype=np.int64)))
         self.assertEqual(len(split_loader), 1)
         split_batch = next(iter(split_loader))
-        self.assertTrue(np.array_equal(split_batch["molecule_ids"], np.array([0, 2], dtype=np.int64)))
+        # One-time shuffle with seed=3 permutes [0, 2] -> [2, 0]
+        self.assertTrue(np.array_equal(split_batch["molecule_ids"], np.array([2, 0], dtype=np.int64)))
 
         with self.assertRaises(ValueError):
             loader.get_split("missing")

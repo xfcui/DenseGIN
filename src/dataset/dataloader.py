@@ -27,7 +27,13 @@ def _load_split_indices(split_path: Path, split_name: str, num_graphs: int) -> n
 
 
 class PCQMDataloader:
-    """Simple batch iterator around `PCQMDataset.batch_collapse`."""
+    """Simple batch iterator around `PCQMDataset.batch_collapse`.
+
+    ``shuffle=False`` draws one random permutation at construction and reuses it
+    for every pass over the data. ``shuffle=True`` draws a new permutation each
+    time the iterator is started (e.g. each training epoch). Use ``seed`` for
+    reproducibility.
+    """
 
     def __init__(
         self,
@@ -57,17 +63,27 @@ class PCQMDataloader:
                 raise ValueError("All dataset indices must be in [0, num_graphs).")
             self.indices = candidate
 
+        # shuffle=False: one random permutation at construction (fixed across epochs).
+        # shuffle=True: fresh permutation on every __iter__ (each epoch).
+        if self.shuffle:
+            self._epoch_rng = np.random.default_rng(seed)
+            self._fixed_order: np.ndarray | None = None
+        else:
+            self._epoch_rng = None
+            order_once = self.indices.copy()
+            np.random.default_rng(seed).shuffle(order_once)
+            self._fixed_order = order_once
+
     def __iter__(self) -> Iterable[Dict[str, np.ndarray]]:
         n = self.indices.size
         if n == 0:
             return iter(())
 
         if self.shuffle:
-            rng = np.random.default_rng(self.seed)
             order = self.indices.copy()
-            rng.shuffle(order)
+            self._epoch_rng.shuffle(order)
         else:
-            order = self.indices
+            order = self._fixed_order
 
         def _iter() -> Iterable[Dict[str, np.ndarray]]:
             for start in range(0, n, self.batch_size):
