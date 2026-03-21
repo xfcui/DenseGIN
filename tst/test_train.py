@@ -61,7 +61,8 @@ class TrainUtilityTest(TestCase):
         f = lr_multiplier_for_param_path
         self.assertEqual(f((GK("atom_embed"), GK("embeddings"))), 0.5)
         self.assertEqual(f((GK("atom_pos"), GK("kernel"))), 0.5)
-        self.assertEqual(f((GK("head"), GK("lin"), GK("kernel"))), 4.0)
+        self.assertEqual(f((GK("head"), GK("lin_pre"), GK("kernel"))), 1.0)
+        self.assertEqual(f((GK("head"), GK("glu_post"), GK("gate"), GK("kernel"))), 4.0)
         self.assertEqual(f((GK("conv"), GK("0"), GK("embed_lora"))), 4.0)
         self.assertEqual(f((GK("conv"), GK("0"), GK("embed_edge"), GK("embeddings"))), 4.0)
         self.assertEqual(f((GK("conv"), GK("0"), GK("lin_pre"), GK("kernel"))), 1.0)

@@ -34,13 +34,17 @@ def _split_or_none(key, num):
         return [None] * num
     return list(jax.random.split(key, num))
 
-def _clip_with_grad(x, min, max):
-    """Clamp with gradients that flow through unclipped regions."""
-    return jax.lax.stop_gradient(x.clip(min, max) - x) + x
-
 def _count_params(model: eqx.Module) -> int:
     """Count the number of parameters in an Equinox module."""
     return sum(x.size for x in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_array)))
+
+def _inverse_softplus(y):
+    """NumPy inverse softplus: ``x`` such that ``log(1 + exp(x)) == y`` (``y > 0``)."""
+    return np.log(np.expm1(y))
+
+def _clip_with_grad(x, min, max):
+    """Clamp with gradients that flow through unclipped regions."""
+    return jax.lax.stop_gradient(x.clip(min, max) - x) + x
 
 
 class EmbedLayer(eqx.Module):
@@ -93,7 +97,7 @@ class ActLayer(eqx.Module):
     bias: jnp.ndarray
 
     def __init__(self, width, *, key=None):
-        self.bias = jnp.zeros((width,), dtype=jnp.float32)
+        self.bias = jnp.full((width,), _inverse_softplus(0.5), dtype=jnp.float32)
 
     def __call__(self, x, key=None):
         """Softplus activation with optional dropout at training time."""
@@ -251,6 +255,7 @@ class ConvKernel(eqx.Module):
 class VirtKernel(eqx.Module):
     """Virtual node aggregation for global information exchange."""
     num_head: int
+    sca_pre:  ScaleLayer
     lin_pre:  LinearLayer
     glu_post: GatedLinearBlock
 
@@ -259,7 +264,8 @@ class VirtKernel(eqx.Module):
         keys = _split_or_none(key, 2)
 
         self.num_head = num_head
-        self.lin_pre = LinearLayer(width, width_norm, keys[0])
+        self.sca_pre  = ScaleLayer(width_norm, scale_init=1.0)
+        self.lin_pre  = LinearLayer(width, width_norm, keys[0])
         self.glu_post = GatedLinearBlock(width_norm, width_norm, num_head, dim_head, keep_groups=True, key=keys[1])
 
         print("##params[virt]:", _count_params(self))
@@ -267,12 +273,7 @@ class VirtKernel(eqx.Module):
     def __call__(self, x, virt, batch, batch_size, key=None):
         """Aggregate graph-level messages and optionally merge with virtual node."""
         msg = self.lin_pre(x)
-        msg = segment_sum(msg, batch, batch_size)
-        msg = msg / jnp.sqrt(jnp.mean(jnp.square(msg), axis=-1, keepdims=True) + EPSILON)
-        if virt is None:
-            virt = msg
-        else:
-            msg = virt = msg + virt
+        msg = virt = segment_sum(msg, batch, batch_size) + self.sca_pre(virt)
         msg = self.glu_post(msg, key=key)[batch]
         return msg, virt
 
@@ -330,28 +331,31 @@ class MixerKernel(eqx.Module):
 class HeadKernel(eqx.Module):
     """Readout head: virtual + node pooling → scalar prediction."""
     num_head: int
+    sca_pre:  ScaleLayer
     lin_pre:  LinearLayer
     glu_post: GatedLinearBlock
+    readout_scale: jnp.ndarray
+    readout_bias: jnp.ndarray
 
     def __init__(self, width, num_head, dim_head, key=None):
         width_norm = num_head * dim_head
         keys = _split_or_none(key, 2)
 
         self.num_head = num_head
+        self.sca_pre  = ScaleLayer(width_norm, scale_init=1.0)
         self.lin_pre  = LinearLayer(width, width_norm, keys[0])
         self.glu_post = GatedLinearBlock(width_norm, 1, num_head*2, dim_head*2, key=keys[1])
+        self.readout_scale = jnp.asarray(1.162127, dtype=jnp.float32)
+        self.readout_bias = jnp.asarray(5.689452, dtype=jnp.float32)
 
         print("##params[head]:", _count_params(self))
 
     def __call__(self, x, virt, batch, batch_size, key=None):
         """Readout head: sum pool, normalize, fuse virtual node, and project."""
         msg = self.lin_pre(x)
-        msg = segment_sum(msg, batch, batch_size)
-        if virt is None:
-            virt = jnp.zeros_like(msg)
-        msg = msg / jnp.sqrt(jnp.mean(jnp.square(msg), axis=-1, keepdims=True) + EPSILON) + virt
+        msg = segment_sum(msg, batch, batch_size) + self.sca_pre(virt)
         msg = self.glu_post(msg, key=key)
-        return msg * 1.162127 + 5.689452
+        return msg * self.readout_scale + self.readout_bias
 
 
 # GIN: https://openreview.net/forum?id=ryGs6iA5Km
@@ -424,7 +428,7 @@ class DenseGIN(eqx.Module):
         batch_size = batch['batch_n_graphs'] + 1
         edges = self._get_edge(batch)
         keys = _split_or_none(key if training else None, (self.depth + 2) * 2)
-        print("nodes={} | {}".format(
+        print("#kernel: nodes={}, {}".format(
             node_feat.shape[0],
             ", ".join(
                 "{}_edges={}".format(
@@ -435,7 +439,7 @@ class DenseGIN(eqx.Module):
             ),
         ))
 
-        x, virt = self.atom_embed(node_feat) + jax.vmap(self.atom_pos)(node_embd) / 10, None
+        x, virt = self.atom_embed(node_feat) + jax.vmap(self.atom_pos)(node_embd) / 10, 0.0
         for i in range(self.depth):
             msg, virt = self.mixs[i](x, virt, edges, graph_id, batch_size, key=keys[2*i])
             x = self.meta[i](x, msg, key=keys[2*i+1])

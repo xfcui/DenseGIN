@@ -42,7 +42,7 @@ def lr_multiplier_for_param_path(path: tuple[Any, ...]) -> float:
     """Per-parameter LR scale relative to the global optimizer LR.
 
     - 0.5×: atom embedding table and atom position encoder (``atom_embed``, ``atom_pos``).
-    - 4×: ConvKernel bond/degree embedding tensors; all HeadKernel parameters.
+    - 4×: ConvKernel bond/degree embedding tensors; HeadKernel ``glu_post`` only.
     """
     names = _attr_segment_names(path)
     if not names:
@@ -50,7 +50,8 @@ def lr_multiplier_for_param_path(path: tuple[Any, ...]) -> float:
     if names[0] in ("atom_embed", "atom_pos"):
         return 0.5
     if names[0] == "head":
-        return 4.0
+        if "glu_post" in names:
+            return 4.0
     if "conv" in names:
         if "embed_lora" in names:
             return 4.0
