@@ -34,6 +34,7 @@ _MODEL_MODULE = importlib.util.module_from_spec(_MODEL_SPEC)
 _MODEL_SPEC.loader.exec_module(_MODEL_MODULE)  # type: ignore[arg-type]
 
 DenseGIN = _MODEL_MODULE.DenseGIN
+DepthMixerKernel = _MODEL_MODULE.DepthMixerKernel
 EmbedLayer = _MODEL_MODULE.EmbedLayer
 LayerMixerKernel = _MODEL_MODULE.LayerMixerKernel
 ParMixKernel = _MODEL_MODULE.ParMixKernel
@@ -348,18 +349,37 @@ class ModelCompatibilityTest(unittest.TestCase):
             self.assertEqual(out.shape[0], int(batch["batch_n_graphs"]))
             self.assertTrue(np.all(np.isfinite(np.asarray(out))))
 
-
+    def test_parmix_kernel_forward_is_finite(self) -> None:
+        batch = _make_minimal_batch()
+        key = jax.random.PRNGKey(99)
+        gin = _dense_gin(depth=1, width=16, num_head=2, key=key)
+        edges = gin._get_edge(batch)
+        pm = ParMixKernel(16, 2, 8, MODEL_EDGE_DIMS_PER_HOP, key=key)
+        x = jnp.zeros((3, 16), dtype=jnp.float32)
+        virt = jnp.zeros((1,), dtype=jnp.float32)
+        out, virt_out = pm(
+            x,
+            virt,
+            edges,
+            jnp.array(batch["node_batch"]),
+            int(batch["batch_n_graphs"]) + 1,
+            key=key,
+        )
+        self.assertEqual(out.shape, (3, 16))
+        self.assertTrue(jnp.all(jnp.isfinite(out)))
+        self.assertTrue(jnp.all(jnp.isfinite(virt_out)))
 
     def test_get_model_matches_expected_default_config(self) -> None:
         model = get_model(None)
         self.assertIsInstance(model, DenseGIN)
-        self.assertEqual(model.depth, 4)
+        self.assertEqual(model.depth, 5)
         self.assertEqual(model.width, 256)
         self.assertEqual(model.num_head, 16)
         self.assertEqual(model.dim_head, 16)
-        self.assertIsInstance(model.atom_mix, LayerMixerKernel)
-        self.assertEqual(len(model.mixs), model.depth)
-        self.assertIsInstance(model.mixs[0], ParMixKernel)
+        self.assertEqual(len(model.layer_mix), model.depth)
+        self.assertIsInstance(model.layer_mix[0], LayerMixerKernel)
+        self.assertEqual(len(model.depth_mix), model.depth)
+        self.assertIsInstance(model.depth_mix[0], DepthMixerKernel)
 
     def test_get_model_uses_stable_seed_when_none(self) -> None:
         model_a = get_model(None)
@@ -375,7 +395,7 @@ class ModelCompatibilityTest(unittest.TestCase):
         batch = _make_minimal_batch()
         model_default = get_model(None)
         model_explicit = DenseGIN(
-            depth=4,
+            depth=5,
             width=256,
             num_head=16,
             dim_head=16,

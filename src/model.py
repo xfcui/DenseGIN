@@ -1,3 +1,4 @@
+from typing import Any
 import jax
 import numpy as np
 import jax.numpy as jnp
@@ -185,12 +186,10 @@ class GatedLinearBlock(eqx.Module):
     def __call__(self, x, y=None, gate_bias=None, value_bias=None, key=None):
         """Run gate/value paths and combine them by elementwise product."""
         keys = _split_or_none(key, 1)
+        y = x if y is None else y
 
         gg = self.gate(x, gate_bias)
-        if y is None:
-            vv = self.value(x, value_bias)
-        else:
-            vv = self.value(y, value_bias)
+        vv = self.value(y, value_bias)
         xx = self.act(gg, keys[0]) * vv
         xx = xx.reshape(*x.shape[:-1], self.num_head, -1)
         xx = jnp.einsum("...hd,hdf->...hf", xx, self.kernel)
@@ -202,23 +201,23 @@ class GatedLinearBlock(eqx.Module):
 # MetaFormer: https://arxiv.org/abs/2210.13452
 class MetaFormerBlock(eqx.Module):
     sca_pre:  ScaleLayer
-    glu_pre:  GatedLinearBlock
-    glu_post: GatedLinearBlock
+    act_pre:  GatedLinearBlock
+    act_post: GatedLinearBlock
 
     def __init__(self, width, num_head, dim_head, key=None):
         keys = _split_or_none(key, 2)
 
         self.sca_pre  = ScaleLayer(width, scale_init=1.0)
-        self.glu_pre  = GatedLinearBlock(width, width, num_head, dim_head, key=keys[0])
-        self.glu_post = GatedLinearBlock(width, width, num_head, dim_head, key=keys[1])
+        self.act_pre  = GatedLinearBlock(width, width, num_head, dim_head, key=keys[0])
+        self.act_post = GatedLinearBlock(width, width, num_head, dim_head, key=keys[1])
 
         print(f"##params[meta]:", _count_params(self))
 
     def __call__(self, x, msg, key=None):
         """Normalize then run two-step MetaFormer update."""
         keys = _split_or_none(key, 2)
-        xx = self.sca_pre(x) + self.glu_pre(x, value_bias=msg, key=keys[0])
-        xx = self.glu_post(xx, key=keys[1])
+        xx = self.sca_pre(x) + self.act_pre(x, value_bias=msg, key=keys[0])
+        xx = self.act_post(xx, key=keys[1])
         return xx
 
 
@@ -230,7 +229,7 @@ class ConvKernel(eqx.Module):
     embed_edge: EmbedLayer
     embed_deg:  EmbedLayer
     lin_pre:    LinearLayer
-    glu_post:   GatedLinearBlock
+    act_post:   GatedLinearBlock
 
     def __init__(self, width, num_head, dim_head, edge_total_vocab, edge_num_features, key=None):
         width_norm = num_head * dim_head
@@ -240,7 +239,7 @@ class ConvKernel(eqx.Module):
         self.embed_edge = EmbedLayer(edge_total_vocab, edge_num_features, width, keys[0], init_std=0.01)
         self.embed_deg  = EmbedLayer(6, 1, width_norm, keys[1], init_std=0.1)
         self.lin_pre    = LinearLayer(width, width_norm, keys[2])
-        self.glu_post   = GatedLinearBlock(width_norm, width_norm, num_head, dim_head, keep_groups=True, key=keys[3])
+        self.act_post   = GatedLinearBlock(width_norm, width_norm, num_head, dim_head, keep_groups=True, key=keys[3])
 
         print(f"##params[conv]:", _count_params(self), edge_total_vocab, edge_num_features)
 
@@ -252,7 +251,7 @@ class ConvKernel(eqx.Module):
         msg = x[edge_idx[0]] + x[edge_idx[1]]  # TODO: optimize this
         msg = self.lin_pre(msg) + jnp.sum(msg * self.embed_edge(edge_attr), axis=-1, keepdims=True) @ self.embed_lora
         msg = segment_sum(msg, edge_idx[1], len(x))
-        msg = self.glu_post(msg, gate_bias=self.embed_deg(deg[:, None]), key=key)
+        msg = self.act_post(msg, gate_bias=self.embed_deg(deg[:, None]), key=key)
         return msg
 
 # GIN-virtual: https://arxiv.org/abs/2103.09430
@@ -261,7 +260,7 @@ class VirtKernel(eqx.Module):
     num_head: int
     sca_pre:  ScaleLayer
     lin_pre:  LinearLayer
-    glu_post: GatedLinearBlock
+    act_post: GatedLinearBlock
 
     def __init__(self, width, num_head, dim_head, key=None):
         width_norm = num_head * dim_head
@@ -270,7 +269,7 @@ class VirtKernel(eqx.Module):
         self.num_head = num_head
         self.sca_pre  = ScaleLayer(width_norm, scale_init=1.0)
         self.lin_pre  = LinearLayer(width, width_norm, keys[0])
-        self.glu_post = GatedLinearBlock(width_norm, width_norm, num_head, dim_head, keep_groups=True, key=keys[1])
+        self.act_post = GatedLinearBlock(width_norm, width_norm, num_head, dim_head, keep_groups=True, key=keys[1])
 
         print("##params[virt]:", _count_params(self))
 
@@ -278,7 +277,7 @@ class VirtKernel(eqx.Module):
         """Aggregate graph-level messages and optionally merge with virtual node."""
         msg = self.lin_pre(x)
         msg = virt = segment_sum(msg, batch, batch_size) + self.sca_pre(virt)
-        msg = self.glu_post(msg, key=key)[batch]
+        msg = self.act_post(msg, key=key)[batch]
         return msg, virt
 
 class LayerMixerKernel(eqx.Module):
@@ -286,7 +285,7 @@ class LayerMixerKernel(eqx.Module):
     num_head: int = eqx.field(static=True)
     dim_head: int = eqx.field(static=True)
     lin_pre:  GroupLinearBlock
-    glu_virt: GatedLinearBlock
+    act_virt: VirtKernel
     lin_post: LinearLayer
     sca_post: ScaleLayer
     conv: tuple
@@ -310,23 +309,51 @@ class LayerMixerKernel(eqx.Module):
             )
             for i in range(num_hops)
         )
-        self.glu_virt = GatedLinearBlock(width_norm, width_norm, num_head, dim_head, key=keys[1], name="virt")
+        self.act_virt = VirtKernel(width_norm, num_head, dim_head, key=keys[1])
         self.lin_post = LinearLayer(width_norm, width, keys[2], init_std=1/(1 + (num_hops + 1) * .75**2)**.5)
         self.sca_post = ScaleLayer(width, scale_init=1.0)
 
         print("##params[layer_mixer]:", _count_params(self))
 
-    def __call__(self, x, edges, batch, batch_size, key=None):
+    def __call__(self, x, virt, edges, batch, batch_size, key=None):
         """Run multi-hop convolutions, then mix with virtual-node message if enabled."""
         keys = _split_or_none(key, len(self.conv) + 1)
 
         xx = self.lin_pre(x)
         for i, (conv, (idx, attr, deg)) in enumerate(zip(self.conv, edges)):
             xx = xx + conv(xx, deg, idx, attr, key=keys[i])
-        yy = segment_sum(xx, batch, batch_size)
-        yy = self.glu_virt(yy, key=keys[-1])
+        yy, virt = self.act_virt(xx, virt, batch, batch_size, key=keys[-1])
         xx = self.lin_post(xx + yy[batch])
         xx = self.sca_post(x) + xx
+        return xx, virt
+
+class DepthMixerKernel(eqx.Module):
+    num_head: int
+    dim_head: int
+    lin_pre:  tuple
+    act_post: GatedLinearBlock
+
+    def __init__(self, depth, width, num_head, dim_head, key=None):
+        width_norm = num_head * dim_head
+        width_act  = num_head * dim_head * WIDTH_ACT_SCALE
+        keys = _split_or_none(key, depth + 1)
+
+        self.num_head = num_head
+        self.dim_head = dim_head
+        self.lin_pre = tuple(
+            LinearLayer(width, width, key=keys[i])
+            for i in range(depth)
+        )
+        self.act_post = GatedLinearBlock(width, width, num_head, dim_head, keep_groups=True, key=keys[-1])
+
+        print(f"##params[depth_mixer]:", _count_params(self))
+
+    def __call__(self, x, x_lst, key=None):
+        """Run gate/value paths and combine them by elementwise product."""
+        keys = _split_or_none(key, 1)
+
+        vv = [lin(v) for lin, v in zip(self.lin_pre, x_lst)]
+        xx = self.act_post(x, sum(vv), key=keys[0])
         return xx
 
 class ParMixKernel(eqx.Module):
@@ -380,7 +407,7 @@ class HeadKernel(eqx.Module):
     num_head: int
     sca_pre:  ScaleLayer
     lin_pre:  LinearLayer
-    glu_post: GatedLinearBlock
+    act_post: GatedLinearBlock
     readout_scale: jnp.ndarray
     readout_bias: jnp.ndarray
 
@@ -391,7 +418,7 @@ class HeadKernel(eqx.Module):
         self.num_head = num_head
         self.sca_pre  = ScaleLayer(width_norm, scale_init=1.0)
         self.lin_pre  = LinearLayer(width, width_norm, keys[0])
-        self.glu_post = GatedLinearBlock(width_norm, 1, num_head*2, dim_head*2, key=keys[1])
+        self.act_post = GatedLinearBlock(width_norm, 1, num_head*2, dim_head*2, key=keys[1])
         self.readout_scale = jnp.asarray(1.162127, dtype=jnp.float32)
         self.readout_bias = jnp.asarray(5.689452, dtype=jnp.float32)
 
@@ -401,7 +428,7 @@ class HeadKernel(eqx.Module):
         """Readout head: sum pool, normalize, fuse virtual node, and project."""
         msg = self.lin_pre(x)
         msg = segment_sum(msg, batch, batch_size) + self.sca_pre(virt)
-        msg = self.glu_post(msg, key=key)
+        msg = self.act_post(msg, key=key)
         return msg * self.readout_scale + self.readout_bias
 
 
@@ -418,17 +445,14 @@ class DenseGIN(eqx.Module):
     # Multi-feature atom encoder: one embedding table per atom feature dimension
     atom_embed: EmbedLayer
     atom_pos:   GatedLinearBlock
-    atom_mix:   LayerMixerKernel
-
-    mixs: tuple  # depth ParMixKernel
-    meta: tuple  # depth MetaFormerBlocks wrapping middle mixers
-
+    layer_mix:  tuple
+    depth_mix:  tuple
     head: HeadKernel
 
     def __init__(self, depth, width, num_head, dim_head, key=None):
         if key is None:
             key = jax.random.PRNGKey(0)
-        keys = _split_or_none(key, 3 + depth * 2 + 1)
+        keys = _split_or_none(key, 4 + depth * 2 + 1)
 
         self.depth = depth
         self.width = width
@@ -442,19 +466,13 @@ class DenseGIN(eqx.Module):
         
         curr = 0
         self.atom_embed = EmbedLayer(NODE_FEAT_TOTAL_VOCAB, len(NODE_FEAT_VOCAB_SIZES), width, keys[curr]); curr += 1
-        self.atom_pos = GatedLinearBlock(EMBED_POS, width, num_head, dim_head, 1, key=keys[curr]); curr += 1
-        self.atom_mix = LayerMixerKernel(width, num_head, dim_head, EDGE_DIMS_PER_HOP, key=keys[curr]); curr += 1
-
-        mixs = []
-        meta = []
+        self.atom_pos   = GatedLinearBlock(EMBED_POS, width, num_head, dim_head, 1, key=keys[curr]); curr += 1
+        layer_mix, depth_mix = [], []
         for i in range(depth):
-            mixs.append(ParMixKernel(width, num_head, dim_head, EDGE_DIMS_PER_HOP, key=keys[curr]))
-            curr += 1
-            meta.append(MetaFormerBlock(width, num_head, dim_head, key=keys[curr]))
-            curr += 1
-        self.mixs = tuple(mixs)
-        self.meta = tuple(meta)
-
+            layer_mix.append(LayerMixerKernel(width, num_head, dim_head, EDGE_DIMS_PER_HOP, key=keys[curr])); curr += 1
+            depth_mix.append(DepthMixerKernel(i+1, width, num_head, dim_head, key=keys[curr])); curr += 1
+        self.layer_mix = tuple(layer_mix)  # type: ignore
+        self.depth_mix = tuple(depth_mix)  # type: ignore
         self.head = HeadKernel(width, num_head, dim_head, key=keys[curr])
 
         print("#params:", _count_params(self))
@@ -474,7 +492,7 @@ class DenseGIN(eqx.Module):
         graph_id   = batch['node_batch']     # (N_pad,)
         batch_size = batch['batch_n_graphs'] + 1
         edges = self._get_edge(batch)
-        keys = _split_or_none(key if training else None, 1 + self.depth * 2)
+        keys = _split_or_none(key if training else None, self.depth * 2)
         print("#kernel: nodes={}, {}".format(
             node_feat.shape[0],
             ", ".join(
@@ -486,11 +504,12 @@ class DenseGIN(eqx.Module):
             ),
         ))
 
-        x, virt = self.atom_embed(node_feat) + jax.vmap(self.atom_pos)(node_embd) / 10, 0.0
-        x = self.atom_mix(x, edges, graph_id, batch_size, key=keys[0])
+        x, x_lst = self.atom_embed(node_feat) + jax.vmap(self.atom_pos)(node_embd) / 10, []
+        virt = jnp.zeros((1,), dtype=jnp.float32)
         for i in range(self.depth):
-            msg, virt = self.mixs[i](x, virt, edges, graph_id, batch_size, key=keys[2*i+1])
-            x = self.meta[i](x, msg, key=keys[2*i+2])
+            x, virt = self.layer_mix[i](x, virt, edges, graph_id, batch_size, key=keys[i*2])
+            x_lst = x_lst + [x]
+            x = self.depth_mix[i](x, x_lst, key=keys[2*i+1])
         y = self.head(x, virt, graph_id, batch_size)[1:]
         return y
 
@@ -508,4 +527,4 @@ class DenseGIN(eqx.Module):
 
 def get_model(key):
     """Create the default DenseGIN model (depth=4, width=256, heads=16)."""
-    return DenseGIN(depth=4, width=256, num_head=16, dim_head=16, key=key)
+    return DenseGIN(depth=5, width=256, num_head=16, dim_head=16, key=key)

@@ -42,7 +42,7 @@ def lr_multiplier_for_param_path(path: tuple[Any, ...]) -> float:
     """Per-parameter LR scale relative to the global optimizer LR.
 
     - 0.5×: atom embedding table and atom position encoder (``atom_embed``, ``atom_pos``).
-    - 4×: ConvKernel bond/degree embedding tensors; HeadKernel ``glu_post`` only.
+    - 4×: ConvKernel bond/degree embedding tensors; HeadKernel ``act_post`` only.
     """
     names = _attr_segment_names(path)
     if not names:
@@ -50,7 +50,7 @@ def lr_multiplier_for_param_path(path: tuple[Any, ...]) -> float:
     if names[0] in ("atom_embed", "atom_pos"):
         return 0.5
     if names[0] == "head":
-        if "glu_post" in names:
+        if "act_post" in names:
             return 4.0
     if "conv" in names:
         if "embed_lora" in names:
@@ -267,12 +267,7 @@ def _check_nan_loss(x: jax.Array) -> None:
 def loss_fn(model, batch, key, threshold=6e-2):
     preds = model(batch, training=(key is not None), key=key)
     preds = preds.squeeze(-1)  # (B, 1) -> (B,)
-
-    # Smooth L1 (Huber): 0.5 * r^2 / beta for |r| < beta, else |r| - 0.5 * beta
-    loss = jnp.abs(preds - batch["labels"])
-    #loss = jnp.where(loss > threshold, loss - 0.5 * threshold, 0.5 * loss**2 / threshold)
-    loss = jnp.mean(loss)
-
+    loss = jnp.mean(jnp.abs(preds - batch["labels"]))
     jax.debug.callback(_check_nan_loss, loss)
     return loss
 
