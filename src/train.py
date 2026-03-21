@@ -268,9 +268,9 @@ def loss_fn(model, batch, key, threshold=6e-2):
     preds = model(batch, training=(key is not None), key=key)
     preds = preds.squeeze(-1)  # (B, 1) -> (B,)
 
-    # MAE with threshold mask to ignore near-zero residuals (numerical noise)
-    loss = jnp.abs(preds - batch['labels'])
-    loss = jnp.where(loss > threshold, loss, loss**2 / threshold)
+    # Smooth L1 (Huber): 0.5 * r^2 / beta for |r| < beta, else |r| - 0.5 * beta
+    loss = jnp.abs(preds - batch["labels"])
+    #loss = jnp.where(loss > threshold, loss - 0.5 * threshold, 0.5 * loss**2 / threshold)
     loss = jnp.mean(loss)
 
     jax.debug.callback(_check_nan_loss, loss)

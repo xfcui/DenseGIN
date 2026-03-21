@@ -187,20 +187,17 @@ class TrainUtilityTest(TestCase):
         np.testing.assert_array_equal(np.asarray(converted["indices"]), batch["indices"])
         self.assertEqual(int(np.asarray(converted["scalar"]),), batch["scalar"])
 
-    def test_loss_fn_applies_mae_threshold(self) -> None:
+    def test_loss_fn_mean_absolute_error(self) -> None:
         model = _AffineModel(weight=1.5, bias=0.0)
         high_residual_batch = {"labels": jnp.array([[1.0]], dtype=jnp.float32)}
         low_residual_batch = {"labels": jnp.array([[0.005]], dtype=jnp.float32)}
 
-        # High residual: |1.0 - 1.5*1.0| = 0.5 > threshold (0.06), so uses MAE directly
+        # Preds = labels * weight; MAE = mean(|pred - label|).
         loss = loss_fn(model, high_residual_batch, key=None)
         np.testing.assert_allclose(np.asarray(loss), np.array(0.5, dtype=np.float32))
-        
-        # Low residual: |0.005 - 1.5*0.005| = 0.0025 < threshold (0.06), so uses quadratic penalty
-        # loss = (0.0025^2) / 0.06 ≈ 0.000104
+
         loss_low = loss_fn(model, low_residual_batch, key=None)
-        expected_low = (0.0025 ** 2) / 0.06
-        np.testing.assert_allclose(np.asarray(loss_low), np.array(expected_low, dtype=np.float32), rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(loss_low), np.array(0.0025, dtype=np.float32), rtol=1e-5)
 
 
 class TrainStepTest(TestCase):

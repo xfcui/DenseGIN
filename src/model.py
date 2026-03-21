@@ -113,8 +113,9 @@ class ActLayer(eqx.Module):
 class LinearLayer(eqx.Module):
     kernel: jnp.ndarray
 
-    def __init__(self, width_in, width_out, key):
-        self.kernel = jax.random.normal(key, (width_in, width_out)) / np.sqrt(width_in)
+    def __init__(self, width_in, width_out, key, *, init_std=1.0):
+        std = init_std / np.sqrt(width_in)
+        self.kernel = jax.random.normal(key, (width_in, width_out)) * std
 
     def __call__(self, x):
         return x @ self.kernel
@@ -160,7 +161,7 @@ class GatedLinearBlock(eqx.Module):
     kernel: jnp.ndarray
     linear: LinearLayer | None
 
-    def __init__(self, width_in, width_out, num_head, dim_head, keep_groups=False, key=None):
+    def __init__(self, width_in, width_out, num_head, dim_head, keep_groups=False, key=None, *, name=None):
         width_norm = num_head * dim_head
         width_act  = num_head * dim_head * WIDTH_ACT_SCALE
         keys = _split_or_none(key, 4)
@@ -177,6 +178,9 @@ class GatedLinearBlock(eqx.Module):
         else:
             self.kernel = jax.random.normal(keys[2], (num_head, dim_head * WIDTH_ACT_SCALE, dim_head)) / np.sqrt(dim_head * WIDTH_ACT_SCALE)
             self.linear = LinearLayer(width_norm, width_out, keys[3])
+
+        if name is not None:
+            print(f"##params[{name}]:", _count_params(self))
 
     def __call__(self, x, y=None, gate_bias=None, value_bias=None, key=None):
         """Run gate/value paths and combine them by elementwise product."""
@@ -277,22 +281,68 @@ class VirtKernel(eqx.Module):
         msg = self.glu_post(msg, key=key)[batch]
         return msg, virt
 
-class MixerKernel(eqx.Module):
-    """Mixes 1-hop, 2-hop, 3-hop convolutions and virtual node information."""
+class LayerMixerKernel(eqx.Module):
+    """Mixes k-hop convolutions and virtual node information."""
+    num_head: int = eqx.field(static=True)
+    dim_head: int = eqx.field(static=True)
+    lin_pre:  GroupLinearBlock
+    glu_virt: GatedLinearBlock
+    lin_post: LinearLayer
+    sca_post: ScaleLayer
+    conv: tuple
+
+    def __init__(self, width, num_head, dim_head, edge_dims_per_hop, key=None):
+        num_hops = len(edge_dims_per_hop)
+        width_norm = num_head * dim_head
+        keys = _split_or_none(key, num_hops + 3)
+
+        self.num_head = num_head
+        self.dim_head = dim_head
+        self.lin_pre  = GroupLinearBlock(width, width_norm, num_head, dim_head, keys[0])
+        self.conv = tuple(
+            ConvKernel(
+                width_norm,
+                num_head,
+                dim_head,
+                edge_dims_per_hop[i][0],
+                edge_dims_per_hop[i][1],
+                key=keys[i+3],
+            )
+            for i in range(num_hops)
+        )
+        self.glu_virt = GatedLinearBlock(width_norm, width_norm, num_head, dim_head, key=keys[1], name="virt")
+        self.lin_post = LinearLayer(width_norm, width, keys[2], init_std=1/(1 + (num_hops + 1) * .75**2)**.5)
+        self.sca_post = ScaleLayer(width, scale_init=1.0)
+
+        print("##params[layer_mixer]:", _count_params(self))
+
+    def __call__(self, x, edges, batch, batch_size, key=None):
+        """Run multi-hop convolutions, then mix with virtual-node message if enabled."""
+        keys = _split_or_none(key, len(self.conv) + 1)
+
+        xx = self.lin_pre(x)
+        for i, (conv, (idx, attr, deg)) in enumerate(zip(self.conv, edges)):
+            xx = xx + conv(xx, deg, idx, attr, key=keys[i])
+        yy = segment_sum(xx, batch, batch_size)
+        yy = self.glu_virt(yy, key=keys[-1])
+        xx = self.lin_post(xx + yy[batch])
+        xx = self.sca_post(x) + xx
+        return xx
+
+class ParMixKernel(eqx.Module):
+    """Mixes k-hop convolutions and virtual node information."""
     num_head: int = eqx.field(static=True)
     dim_head: int = eqx.field(static=True)
     conv: tuple
-    virt: VirtKernel | None
-    use_virt: bool = eqx.field(static=True)
+    virt: VirtKernel
     scale: jnp.ndarray
 
-    def __init__(self, width, num_head, dim_head, edge_dims_per_hop, use_virt=True, key=None):
+    def __init__(self, width, num_head, dim_head, edge_dims_per_hop, key=None):
         num_hops = len(edge_dims_per_hop)
-        num_virt_keys = 1 if use_virt else 0
-        keys = _split_or_none(key, num_hops + num_virt_keys)
+        keys = _split_or_none(key, num_hops + 1)
+
         self.num_head = num_head
         self.dim_head = dim_head
-        self.use_virt = use_virt
         self.conv = tuple(
             ConvKernel(
                 width,
@@ -304,17 +354,15 @@ class MixerKernel(eqx.Module):
             )
             for i in range(num_hops)
         )
-        if self.use_virt:
-            self.virt = VirtKernel(width, num_head, dim_head, key=keys[-1])
-        else:
-            self.virt = None
+        self.virt = VirtKernel(width, num_head, dim_head, key=keys[-1])
         # scale shape: (num_messages, num_head)
-        self.scale = jnp.zeros((num_hops + num_virt_keys, num_head), dtype=jnp.float32)
+        self.scale = jnp.zeros((num_hops + 1, num_head), dtype=jnp.float32)
+
+        print("##params[parmix]:", _count_params(self))
 
     def __call__(self, x, virt, edges, batch, batch_size, key=None):
         """Run multi-hop convolutions, then mix with virtual-node message if enabled."""
-        num_virt = 1 if self.use_virt else 0
-        keys = _split_or_none(key, len(self.conv) + num_virt)
+        keys = _split_or_none(key, len(self.conv) + 1)
 
         scale = jax.nn.softplus(self.scale)
         scale = _clip_with_grad(scale, 1/MINMAX_RATIO, MINMAX_RATIO)
@@ -322,9 +370,8 @@ class MixerKernel(eqx.Module):
         scale = jnp.repeat(scale, self.dim_head, axis=-1)
         
         msg = [conv(x, deg, idx, attr, key=keys[i]) for i, (conv, (idx, attr, deg)) in enumerate(zip(self.conv, edges))]
-        if self.use_virt:
-            ext, virt = self.virt(x, virt, batch, batch_size, key=keys[-1])
-            msg = msg + [ext]
+        ext, virt = self.virt(x, virt, batch, batch_size, key=keys[-1])
+        msg = msg + [ext]
         msg = sum(s * m for s, m in zip(scale, msg))
         return msg, virt
 
@@ -371,8 +418,9 @@ class DenseGIN(eqx.Module):
     # Multi-feature atom encoder: one embedding table per atom feature dimension
     atom_embed: EmbedLayer
     atom_pos:   GatedLinearBlock
+    atom_mix:   LayerMixerKernel
 
-    mixs: tuple  # depth MixerKernels
+    mixs: tuple  # depth ParMixKernel
     meta: tuple  # depth MetaFormerBlocks wrapping middle mixers
 
     head: HeadKernel
@@ -380,6 +428,8 @@ class DenseGIN(eqx.Module):
     def __init__(self, depth, width, num_head, dim_head, key=None):
         if key is None:
             key = jax.random.PRNGKey(0)
+        keys = _split_or_none(key, 3 + depth * 2 + 1)
+
         self.depth = depth
         self.width = width
         self.num_head = num_head
@@ -390,18 +440,15 @@ class DenseGIN(eqx.Module):
             f"num_head={self.num_head}, dim_head={self.dim_head}"
         )
         
-        # keys: atom_embed (1), atom_pos (1), mixers (depth + 2), meta (depth), glu (2), head (1)
-        total_keys = 1 + 1 + (depth + 2) + depth + 2 + 1
-        keys = _split_or_none(key, total_keys)
-        
         curr = 0
         self.atom_embed = EmbedLayer(NODE_FEAT_TOTAL_VOCAB, len(NODE_FEAT_VOCAB_SIZES), width, keys[curr]); curr += 1
         self.atom_pos = GatedLinearBlock(EMBED_POS, width, num_head, dim_head, 1, key=keys[curr]); curr += 1
+        self.atom_mix = LayerMixerKernel(width, num_head, dim_head, EDGE_DIMS_PER_HOP, key=keys[curr]); curr += 1
 
         mixs = []
         meta = []
         for i in range(depth):
-            mixs.append(MixerKernel(width, num_head, dim_head, EDGE_DIMS_PER_HOP, use_virt=i>0, key=keys[curr]))
+            mixs.append(ParMixKernel(width, num_head, dim_head, EDGE_DIMS_PER_HOP, key=keys[curr]))
             curr += 1
             meta.append(MetaFormerBlock(width, num_head, dim_head, key=keys[curr]))
             curr += 1
@@ -427,7 +474,7 @@ class DenseGIN(eqx.Module):
         graph_id   = batch['node_batch']     # (N_pad,)
         batch_size = batch['batch_n_graphs'] + 1
         edges = self._get_edge(batch)
-        keys = _split_or_none(key if training else None, (self.depth + 2) * 2)
+        keys = _split_or_none(key if training else None, 1 + self.depth * 2)
         print("#kernel: nodes={}, {}".format(
             node_feat.shape[0],
             ", ".join(
@@ -440,9 +487,10 @@ class DenseGIN(eqx.Module):
         ))
 
         x, virt = self.atom_embed(node_feat) + jax.vmap(self.atom_pos)(node_embd) / 10, 0.0
+        x = self.atom_mix(x, edges, graph_id, batch_size, key=keys[0])
         for i in range(self.depth):
-            msg, virt = self.mixs[i](x, virt, edges, graph_id, batch_size, key=keys[2*i])
-            x = self.meta[i](x, msg, key=keys[2*i+1])
+            msg, virt = self.mixs[i](x, virt, edges, graph_id, batch_size, key=keys[2*i+1])
+            x = self.meta[i](x, msg, key=keys[2*i+2])
         y = self.head(x, virt, graph_id, batch_size)[1:]
         return y
 
@@ -459,6 +507,5 @@ class DenseGIN(eqx.Module):
 
 
 def get_model(key):
-    """Create the default DenseGIN model (depth=5, width=256, heads=16)."""
-    return DenseGIN(depth=5, width=256, num_head=16, dim_head=16, key=key)
-
+    """Create the default DenseGIN model (depth=4, width=256, heads=16)."""
+    return DenseGIN(depth=4, width=256, num_head=16, dim_head=16, key=key)

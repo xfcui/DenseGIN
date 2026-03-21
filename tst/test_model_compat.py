@@ -35,6 +35,8 @@ _MODEL_SPEC.loader.exec_module(_MODEL_MODULE)  # type: ignore[arg-type]
 
 DenseGIN = _MODEL_MODULE.DenseGIN
 EmbedLayer = _MODEL_MODULE.EmbedLayer
+LayerMixerKernel = _MODEL_MODULE.LayerMixerKernel
+ParMixKernel = _MODEL_MODULE.ParMixKernel
 get_model = _MODEL_MODULE.get_model
 
 PCQMDataset = _DATASET_MODULE.PCQMDataset
@@ -351,10 +353,13 @@ class ModelCompatibilityTest(unittest.TestCase):
     def test_get_model_matches_expected_default_config(self) -> None:
         model = get_model(None)
         self.assertIsInstance(model, DenseGIN)
-        self.assertEqual(model.depth, 5)
+        self.assertEqual(model.depth, 4)
         self.assertEqual(model.width, 256)
         self.assertEqual(model.num_head, 16)
         self.assertEqual(model.dim_head, 16)
+        self.assertIsInstance(model.atom_mix, LayerMixerKernel)
+        self.assertEqual(len(model.mixs), model.depth)
+        self.assertIsInstance(model.mixs[0], ParMixKernel)
 
     def test_get_model_uses_stable_seed_when_none(self) -> None:
         model_a = get_model(None)
@@ -370,7 +375,7 @@ class ModelCompatibilityTest(unittest.TestCase):
         batch = _make_minimal_batch()
         model_default = get_model(None)
         model_explicit = DenseGIN(
-            depth=5,
+            depth=4,
             width=256,
             num_head=16,
             dim_head=16,
