@@ -547,7 +547,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=512)
-    parser.add_argument('--learning_rate', type=float, default=2e-3)
+    parser.add_argument('--learning_rate', type=float, default=3e-3)
     parser.add_argument('--weight_decay', type=float, default=2e-2)
     parser.add_argument('--scheduler_period', type=int, default=8, help='Period for geometric LR scheduler')
     parser.add_argument('--model_save_path', type=str, default="results/best_model.eqx", help='Path to save the best model')

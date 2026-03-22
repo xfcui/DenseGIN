@@ -35,7 +35,7 @@ _MODEL_SPEC.loader.exec_module(_MODEL_MODULE)  # type: ignore[arg-type]
 
 DenseGIN = _MODEL_MODULE.DenseGIN
 DepthMixerKernel = _MODEL_MODULE.DepthMixerKernel
-ElecEmbedLayer = _MODEL_MODULE.ElecEmbedLayer
+DiffEmbedLayer = _MODEL_MODULE.DiffEmbedLayer
 EmbedLayer = _MODEL_MODULE.EmbedLayer
 LayerMixerKernel = _MODEL_MODULE.LayerMixerKernel
 MoAct = _MODEL_MODULE.MoAct
@@ -155,8 +155,8 @@ class ModelCompatibilityTest(unittest.TestCase):
         self.assertEqual(ys.shape, (2, 2))
         self.assertTrue(np.all(np.isfinite(np.asarray(ys))))
 
-    def test_elec_embed_layer_forward_shape(self) -> None:
-        layer = ElecEmbedLayer(2, 8, jax.random.PRNGKey(0))
+    def test_diff_embed_layer_forward_shape(self) -> None:
+        layer = DiffEmbedLayer(2, 8, jax.random.PRNGKey(0))
         x = jnp.array([[0.1, 0.2], [-0.3, 0.0]], dtype=jnp.float32)
         y = layer(x)
         self.assertEqual(y.shape, (2, 8))

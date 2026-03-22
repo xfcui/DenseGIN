@@ -142,7 +142,7 @@ class MoAct(eqx.Module):
             return fn(x[..., None] * s) @ w
         return (fn(x[..., None] * s) * w).sum(-1)
 
-class ElecEmbedLayer(eqx.Module):
+class DiffEmbedLayer(eqx.Module):
     """Per-edge electronegativity difference: MoAct (2 channels) → linear to ``dim_head``."""
 
     moa: MoAct
@@ -237,10 +237,10 @@ class GatedLinearBlock(eqx.Module):
 # GNN-AK: https://openreview.net/forum?id=Mspk_WYKoEH
 class ConvKernel(eqx.Module):
     """Bond-aware graph convolution with degree normalisation."""
-    lora_down: jnp.ndarray
-    lora_up: jnp.ndarray
+    lora_down:  jnp.ndarray
+    lora_up:    jnp.ndarray
     embed_edge: EmbedLayer
-    embed_elec: ElecEmbedLayer
+    embed_elec: DiffEmbedLayer
     embed_deg:  EmbedLayer
     lin_pre:    LinearLayer
     act_post:   GatedLinearBlock
@@ -249,10 +249,10 @@ class ConvKernel(eqx.Module):
         width_norm = num_head * dim_head
         keys = _split_or_none(key, 6)
 
-        self.lora_down = jax.random.normal(keys[4], (width, dim_head)) / np.sqrt(width)
-        self.lora_up = jnp.zeros((dim_head, width_norm), dtype=jnp.float32)
+        self.lora_down  = jax.random.normal(keys[4], (width, dim_head)) / np.sqrt(width)
+        self.lora_up    = jnp.zeros((dim_head, width_norm), dtype=jnp.float32)
         self.embed_edge = EmbedLayer(edge_total_vocab, edge_num_features, dim_head, keys[0], init_std=0.01)
-        self.embed_elec = ElecEmbedLayer(2, dim_head, keys[5], init_std=0.01)
+        self.embed_elec = DiffEmbedLayer(2, dim_head, keys[5], init_std=0.01)
         self.embed_deg  = EmbedLayer(6, 1, width_norm, keys[1], init_std=0.1)
         self.lin_pre    = LinearLayer(width, width_norm, keys[2])
         self.act_post   = GatedLinearBlock(width_norm, width_norm, num_head, dim_head, keep_groups=True, key=keys[3])
@@ -352,7 +352,8 @@ class DepthMixerKernel(eqx.Module):
 
     def __init__(self, depth, width, num_head, dim_head, key=None):
         width_norm = num_head * dim_head
-        keys = _split_or_none(key, depth + 1)
+        num_keys = depth + 1 if depth > 1 else 1
+        keys = _split_or_none(key, num_keys)
 
         self.num_head = num_head
         self.dim_head = dim_head
@@ -427,7 +428,7 @@ class DenseGIN(eqx.Module):
     def __init__(self, depth, width, num_head, dim_head, key=None):
         if key is None:
             key = jax.random.PRNGKey(0)
-        keys = _split_or_none(key, 4 + depth * 2 + 1)
+        keys = _split_or_none(key, depth * 2 + 3)
 
         self.depth = depth
         self.width = width
