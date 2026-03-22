@@ -103,59 +103,6 @@ class ActLayer(eqx.Module):
         return xx * mask.astype(xx.dtype) / keep
 
 
-# Mixture of Activation — generalised from doc/mix_tanh/README.md
-_MOA_ACTS = {"tanh": jnp.tanh, "sigmoid": jax.nn.sigmoid, "softplus": jax.nn.softplus}
-
-class MoAct(eqx.Module):
-    """Learnable embedding f(x)=Σ_i w_i·act(s_i·x) per channel, with user-chosen activation.
-
-    Supported ``act``: ``"tanh"`` (bounded odd), ``"sigmoid"`` (bounded monotone),
-    ``"softplus"`` (smooth relu-like, unbounded above).  Mixing weights are
-    softplus-normalised and scales are softplus-positive.
-    """
-
-    raw_weights: jnp.ndarray
-    raw_scales: jnp.ndarray
-    num_channels: int = eqx.field(static=True)
-    num_bases: int = eqx.field(static=True)
-    act: str = eqx.field(static=True)
-
-    def __init__(self, num_channels: int, num_bases: int = 8, act: str = "tanh"):
-        if act not in _MOA_ACTS:
-            raise ValueError(f"act must be one of {list(_MOA_ACTS)}, got {act!r}")
-        self.num_channels = num_channels
-        self.num_bases = num_bases
-        self.act = act
-
-        lo = float(_inverse_softplus(0.1))
-        hi = float(_inverse_softplus(10.0))
-        self.raw_weights = jnp.zeros((num_channels, num_bases))
-        self.raw_scales = jnp.tile(jnp.linspace(lo, hi, num_bases), (num_channels, 1))
-
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        fn = _MOA_ACTS[self.act]
-        w = jax.nn.softplus(self.raw_weights)
-        w = w / w.sum(axis=-1, keepdims=True)
-        s = jax.nn.softplus(self.raw_scales)
-        if self.num_channels == 1:
-            w, s = w.squeeze(0), s.squeeze(0)
-            return fn(x[..., None] * s) @ w
-        return (fn(x[..., None] * s) * w).sum(-1)
-
-class DiffEmbedLayer(eqx.Module):
-    """Per-edge electronegativity difference: MoAct (2 channels) → linear to ``dim_head``."""
-
-    moa: MoAct
-    linear: LinearLayer
-
-    def __init__(self, num_channels, dim_head, key, *, init_std=1.0):
-        self.moa = MoAct(num_channels, dim_head, act="tanh")
-        self.linear = LinearLayer(num_channels, dim_head, key, init_std=init_std)
-
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        return self.linear(self.moa(x))
-
-
 class GroupLinearBlock(eqx.Module):
     """Groups-parallel linear: weight ``(num_head, d_in, d_out)``, no bias."""
     num_head: int
@@ -233,6 +180,59 @@ class GatedLinearBlock(eqx.Module):
         return xx
 
 
+# Mixture of Activation — generalised from doc/mix_tanh/README.md
+_MOA_ACTS = {"tanh": jnp.tanh, "sigmoid": jax.nn.sigmoid, "softplus": jax.nn.softplus}
+
+class MoAct(eqx.Module):
+    """Learnable embedding f(x)=Σ_i w_i·act(s_i·x) per channel, with user-chosen activation.
+
+    Supported ``act``: ``"tanh"`` (bounded odd), ``"sigmoid"`` (bounded monotone),
+    ``"softplus"`` (smooth relu-like, unbounded above).  Mixing weights are
+    softplus-normalised and scales are softplus-positive.
+    """
+
+    raw_weights: jnp.ndarray
+    raw_scales: jnp.ndarray
+    num_channels: int = eqx.field(static=True)
+    num_bases: int = eqx.field(static=True)
+    act: str = eqx.field(static=True)
+
+    def __init__(self, num_channels: int, num_bases: int = 8, act: str = "tanh"):
+        if act not in _MOA_ACTS:
+            raise ValueError(f"act must be one of {list(_MOA_ACTS)}, got {act!r}")
+        self.num_channels = num_channels
+        self.num_bases = num_bases
+        self.act = act
+
+        lo = float(_inverse_softplus(0.1))
+        hi = float(_inverse_softplus(10.0))
+        self.raw_weights = jnp.zeros((num_channels, num_bases))
+        self.raw_scales = jnp.tile(jnp.linspace(lo, hi, num_bases), (num_channels, 1))
+
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        fn = _MOA_ACTS[self.act]
+        w = jax.nn.softplus(self.raw_weights)
+        w = w / w.sum(axis=-1, keepdims=True)
+        s = jax.nn.softplus(self.raw_scales)
+        if self.num_channels == 1:
+            w, s = w.squeeze(0), s.squeeze(0)
+            return fn(x[..., None] * s) @ w
+        return (fn(x[..., None] * s) * w).sum(-1)
+
+class DiffEmbedLayer(eqx.Module):
+    """Per-edge electronegativity difference: MoAct (2 channels) → linear to ``dim_head``."""
+
+    moa: MoAct
+    linear: LinearLayer
+
+    def __init__(self, num_channels, dim_head, key, *, init_std=1.0):
+        self.moa = MoAct(num_channels, dim_head, act="tanh")
+        self.linear = LinearLayer(num_channels, dim_head, key, init_std=init_std)
+
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        return self.linear(self.moa(x))
+
+
 # VoVNet: https://arxiv.org/abs/1904.09730
 # GNN-AK: https://openreview.net/forum?id=Mspk_WYKoEH
 class ConvKernel(eqx.Module):
@@ -295,6 +295,23 @@ class VirtKernel(eqx.Module):
         msg = self.act_post(msg, key=key)[batch]
         return msg, virt
 
+
+class SelfMixerKernel(eqx.Module):
+    num_head: int = eqx.field(static=True)
+    dim_head: int = eqx.field(static=True)
+    act: GatedLinearBlock
+    sca: ScaleLayer
+
+    def __init__(self, width, num_head, dim_head, key=None):
+        self.num_head = num_head
+        self.dim_head = dim_head
+        self.act = GatedLinearBlock(width, width, num_head, dim_head, key=key)
+        self.sca = ScaleLayer(width, scale_init=1.0)
+
+        print("##params[self_mixer]:", _count_params(self))
+
+    def __call__(self, x, key=None):
+        return self.sca(x) + self.act(x, key=key)
 
 class LayerMixerKernel(eqx.Module):
     """Mixes k-hop convolutions and virtual node information."""
@@ -373,7 +390,7 @@ class DepthMixerKernel(eqx.Module):
         keys = _split_or_none(key, 1)
 
         if self.lin_pre is not None:
-            x_lst = [lin(x + v) for lin, v in zip(self.lin_pre, x_lst)]
+            x_lst = [l(v) for l, v in zip(self.lin_pre, x_lst)]
         xx = self.act_post(x, sum(x_lst), key=keys[0])
         return xx
 
@@ -402,10 +419,11 @@ class HeadKernel(eqx.Module):
 
     def __call__(self, x, virt, batch, batch_size, key=None):
         """Sum-pool nodes, fuse virtual node, project to scalar, and apply output affine."""
-        msg = self.lin_pre(x)
-        msg = segment_sum(msg, batch, batch_size) + self.sca_pre(virt)
-        msg = self.act_post(msg, key=key)
-        return msg * self.readout_scale + self.readout_bias
+        xx = self.lin_pre(x)
+        yy = segment_sum(xx, batch, batch_size) + self.sca_pre(virt)
+        yy = self.act_post(yy, key=key)
+        yy = yy * self.readout_scale + self.readout_bias
+        return yy
 
 
 # GIN: https://openreview.net/forum?id=ryGs6iA5Km
@@ -423,12 +441,13 @@ class DenseGIN(eqx.Module):
     atom_pos:   GatedLinearBlock
     layer_mix:  tuple
     depth_mix:  tuple
+    last_mix:   SelfMixerKernel
     head: HeadKernel
 
     def __init__(self, depth, width, num_head, dim_head, key=None):
         if key is None:
             key = jax.random.PRNGKey(0)
-        keys = _split_or_none(key, depth * 2 + 3)
+        keys = _split_or_none(key, depth * 2 + 4)
 
         self.depth = depth
         self.width = width
@@ -449,6 +468,7 @@ class DenseGIN(eqx.Module):
             depth_mix.append(DepthMixerKernel(i+1, width, num_head, dim_head, key=keys[curr])); curr += 1
         self.layer_mix = tuple(layer_mix)  # type: ignore
         self.depth_mix = tuple(depth_mix)  # type: ignore
+        self.last_mix = SelfMixerKernel(width, num_head, dim_head, key=keys[curr]); curr += 1
         self.head = HeadKernel(width, num_head, dim_head, key=keys[curr])
 
         print("#params:", _count_params(self))
@@ -469,7 +489,7 @@ class DenseGIN(eqx.Module):
         graph_id   = batch['node_batch']     # (N_pad,)
         batch_size = batch['batch_n_graphs'] + 1
         edges = self._get_edge(batch)
-        keys = _split_or_none(key if training else None, self.depth * 2)
+        keys = _split_or_none(key if training else None, self.depth * 2 + 1)
         print("#kernel: nodes={}, {}".format(
             node_feat.shape[0],
             ", ".join(
@@ -487,6 +507,7 @@ class DenseGIN(eqx.Module):
             x, virt = self.layer_mix[i](x, virt, edges, graph_id, batch_size, node_elec, key=keys[i*2])
             x_lst = x_lst + [x]
             x = self.depth_mix[i](x, x_lst, key=keys[2*i+1])
+        x = self.last_mix(x, key=keys[-1])
         y = self.head(x, virt, graph_id, batch_size)[1:]
         return y
 
