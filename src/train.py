@@ -426,18 +426,29 @@ def _train_one_epoch(
     train_loader,
     train_key: jax.Array,
     epoch: int,
+    steps_per_epoch: int,
+    scheduler_period: int | None,
+    learning_rate: float,
+    weight_decay: float,
 ):
     total_train_loss = 0.0
     num_train_batches = 0
     train_pbar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]")
-    for batch in train_pbar:
+    for batch_idx, batch in enumerate(train_pbar):
         batch = to_jax_batch(batch)
         train_key, step_key = jax.random.split(train_key)
         model, opt_state, loss = train_step(model, opt_state, batch, optimizer, step_key)
         loss_val = loss.item()
         total_train_loss += loss_val
         num_train_batches += 1
-        train_pbar.set_postfix(loss=f"{loss_val:.4f}")
+        epoch_frac = (epoch * steps_per_epoch + batch_idx) / steps_per_epoch
+        if scheduler_period is not None:
+            cur_lr, cur_wd = get_scheduled_hparams(
+                epoch_frac, scheduler_period, learning_rate, weight_decay
+            )
+        else:
+            cur_lr, cur_wd = learning_rate, weight_decay
+        train_pbar.set_postfix(loss=f"{loss_val:.4f}", lr=f"{cur_lr:.2e}", wd=f"{cur_wd:.2e}")
     avg_train_loss = total_train_loss / max(num_train_batches, 1)
     return model, opt_state, train_key, avg_train_loss
 
@@ -521,6 +532,7 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
     for epoch in range(num_epochs):
         model, opt_state, train_key, avg_train_loss = _train_one_epoch(
             model, optimizer, opt_state, train_loader, train_key, epoch,
+            steps_per_epoch, scheduler_period, learning_rate, weight_decay,
         )
         avg_valid_loss = _validate_one_epoch(model, valid_loader, epoch)
 
