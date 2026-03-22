@@ -35,8 +35,10 @@ _MODEL_SPEC.loader.exec_module(_MODEL_MODULE)  # type: ignore[arg-type]
 
 DenseGIN = _MODEL_MODULE.DenseGIN
 DepthMixerKernel = _MODEL_MODULE.DepthMixerKernel
+ElecEmbedLayer = _MODEL_MODULE.ElecEmbedLayer
 EmbedLayer = _MODEL_MODULE.EmbedLayer
 LayerMixerKernel = _MODEL_MODULE.LayerMixerKernel
+MoAct = _MODEL_MODULE.MoAct
 get_model = _MODEL_MODULE.get_model
 
 PCQMDataset = _DATASET_MODULE.PCQMDataset
@@ -131,6 +133,35 @@ def _dense_gin(
 
 
 class ModelCompatibilityTest(unittest.TestCase):
+    def test_moact_rejects_unknown_activation(self) -> None:
+        with self.assertRaises(ValueError):
+            MoAct(2, 4, act="relu")
+
+    def test_moact_forward_two_and_single_channel_finite(self) -> None:
+        m2 = MoAct(2, num_bases=4, act="tanh")
+        x2 = jnp.array([[0.1, -0.2], [0.3, 0.4]], dtype=jnp.float32)
+        y2 = m2(x2)
+        self.assertEqual(y2.shape, (2, 2))
+        self.assertTrue(np.all(np.isfinite(np.asarray(y2))))
+
+        m1 = MoAct(1, num_bases=3, act="softplus")
+        x1 = jnp.array([0.5, -1.0], dtype=jnp.float32)
+        y1 = m1(x1)
+        self.assertEqual(y1.shape, (2,))
+        self.assertTrue(np.all(np.isfinite(np.asarray(y1))))
+
+        ms = MoAct(2, num_bases=4, act="sigmoid")
+        ys = ms(x2)
+        self.assertEqual(ys.shape, (2, 2))
+        self.assertTrue(np.all(np.isfinite(np.asarray(ys))))
+
+    def test_elec_embed_layer_forward_shape(self) -> None:
+        layer = ElecEmbedLayer(2, 8, jax.random.PRNGKey(0))
+        x = jnp.array([[0.1, 0.2], [-0.3, 0.0]], dtype=jnp.float32)
+        y = layer(x)
+        self.assertEqual(y.shape, (2, 8))
+        self.assertTrue(np.all(np.isfinite(np.asarray(y))))
+
     def test_embed_layer_uses_pre_offset_tokens(self) -> None:
         embeddings = np.zeros((32, 6), dtype=np.float32)
         for row in range(1, 32):
