@@ -37,7 +37,6 @@ DenseGIN = _MODEL_MODULE.DenseGIN
 DepthMixerKernel = _MODEL_MODULE.DepthMixerKernel
 EmbedLayer = _MODEL_MODULE.EmbedLayer
 LayerMixerKernel = _MODEL_MODULE.LayerMixerKernel
-ParMixKernel = _MODEL_MODULE.ParMixKernel
 get_model = _MODEL_MODULE.get_model
 
 PCQMDataset = _DATASET_MODULE.PCQMDataset
@@ -348,26 +347,6 @@ class ModelCompatibilityTest(unittest.TestCase):
             out = model(batch, training=False, key=None)
             self.assertEqual(out.shape[0], int(batch["batch_n_graphs"]))
             self.assertTrue(np.all(np.isfinite(np.asarray(out))))
-
-    def test_parmix_kernel_forward_is_finite(self) -> None:
-        batch = _make_minimal_batch()
-        key = jax.random.PRNGKey(99)
-        gin = _dense_gin(depth=1, width=16, num_head=2, key=key)
-        edges = gin._get_edge(batch)
-        pm = ParMixKernel(16, 2, 8, MODEL_EDGE_DIMS_PER_HOP, key=key)
-        x = jnp.zeros((3, 16), dtype=jnp.float32)
-        virt = jnp.zeros((1,), dtype=jnp.float32)
-        out, virt_out = pm(
-            x,
-            virt,
-            edges,
-            jnp.array(batch["node_batch"]),
-            int(batch["batch_n_graphs"]) + 1,
-            key=key,
-        )
-        self.assertEqual(out.shape, (3, 16))
-        self.assertTrue(jnp.all(jnp.isfinite(out)))
-        self.assertTrue(jnp.all(jnp.isfinite(virt_out)))
 
     def test_get_model_matches_expected_default_config(self) -> None:
         model = get_model(None)

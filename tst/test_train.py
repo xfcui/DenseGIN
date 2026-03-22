@@ -35,11 +35,14 @@ get_scheduled_hparams = TRAIN.get_scheduled_hparams
 _resolve_dataset_root = TRAIN._resolve_dataset_root
 get_jax_dataloader = TRAIN.get_jax_dataloader
 lr_multiplier_for_param_path = TRAIN.lr_multiplier_for_param_path
+wd_multiplier_for_param_path = TRAIN.wd_multiplier_for_param_path
 per_param_lr_multiplier_tree = TRAIN.per_param_lr_multiplier_tree
+per_param_wd_multiplier_tree = TRAIN.per_param_wd_multiplier_tree
 make_optimizer = TRAIN.make_optimizer
 _make_lr_schedule = TRAIN._make_lr_schedule
 _make_wd_schedule = TRAIN._make_wd_schedule
-_add_scheduled_decayed_weights = TRAIN._add_scheduled_decayed_weights
+_add_scaled_decayed_weights = TRAIN._add_scaled_decayed_weights
+_add_lora_product_decay = TRAIN._add_lora_product_decay
 
 
 class _AffineModel(eqx.Module):
@@ -63,10 +66,30 @@ class TrainUtilityTest(TestCase):
         self.assertEqual(f((GK("atom_pos"), GK("kernel"))), 0.5)
         self.assertEqual(f((GK("head"), GK("lin_pre"), GK("kernel"))), 1.0)
         self.assertEqual(f((GK("head"), GK("act_post"), GK("gate"), GK("kernel"))), 4.0)
-        self.assertEqual(f((GK("conv"), GK("0"), GK("embed_lora"))), 4.0)
+        self.assertEqual(f((GK("conv"), GK("0"), GK("lora_down"))), 4.0)
+        self.assertEqual(f((GK("conv"), GK("0"), GK("lora_up"))), 4.0)
         self.assertEqual(f((GK("conv"), GK("0"), GK("embed_edge"), GK("embeddings"))), 4.0)
         self.assertEqual(f((GK("conv"), GK("0"), GK("lin_pre"), GK("kernel"))), 1.0)
+        self.assertEqual(f((GK("head"), GK("sca_pre"), GK("scale"))), 0.5)
+        self.assertEqual(f((GK("head"), GK("readout_scale"))), 0.5)
+        self.assertEqual(f((GK("head"), GK("readout_bias"))), 0.5)
+        self.assertEqual(f((GK("layer_mix"), GK("0"), GK("sca_post"), GK("scale"))), 0.5)
         self.assertEqual(f((GK("other"),)), 1.0)
+
+    def test_wd_multiplier_for_param_path_rules(self) -> None:
+        GK = jtu.GetAttrKey
+        f = wd_multiplier_for_param_path
+        self.assertEqual(f((GK("atom_embed"), GK("embeddings"))), 0.5)
+        self.assertEqual(f((GK("head"), GK("lin_pre"), GK("kernel"))), 1.0)
+        self.assertEqual(f((GK("head"), GK("act_post"), GK("gate"), GK("kernel"))), 1.0)
+        self.assertEqual(f((GK("head"), GK("act_post"), GK("act"), GK("bias"))), 0.0)
+        self.assertEqual(f((GK("head"), GK("readout_scale"))), 0.0)
+        self.assertEqual(f((GK("head"), GK("readout_bias"))), 0.0)
+        self.assertEqual(f((GK("head"), GK("sca_pre"), GK("scale"))), 0.0)
+        self.assertEqual(f((GK("conv"), GK("0"), GK("lora_down"))), 0.0)
+        self.assertEqual(f((GK("conv"), GK("0"), GK("lora_up"))), 0.0)
+        self.assertEqual(f((GK("conv"), GK("0"), GK("embed_edge"), GK("embeddings"))), 0.5)
+        self.assertEqual(f((GK("other"),)), 0.0)
 
     def test_per_param_lr_multiplier_tree_matches_leaves(self) -> None:
         model = _AffineModel()
@@ -75,11 +98,24 @@ class TrainUtilityTest(TestCase):
         for m in jtu.tree_leaves(mults):
             self.assertEqual(float(m), 1.0)
 
+    def test_per_param_wd_multiplier_tree_matches_leaves(self) -> None:
+        model = _AffineModel()
+        params = eqx.filter(model, eqx.is_array)
+        mults = per_param_wd_multiplier_tree(params)
+        for m in jtu.tree_leaves(mults):
+            self.assertEqual(float(m), 0.0)
+
     def test_make_optimizer_applies_lr_multiplier_tree(self) -> None:
         model = _AffineModel(weight=1.0, bias=0.0)
         params = eqx.filter(model, eqx.is_array)
         mults = jtu.tree_map(lambda _: 2.0, params)
-        opt = make_optimizer(learning_rate=0.1, weight_decay=0.0, mask=None, lr_multiplier_tree=mults)
+        wd_mults = jtu.tree_map(lambda _: 1.0, params)
+        opt = make_optimizer(
+            learning_rate=0.1,
+            weight_decay=0.0,
+            wd_multiplier_tree=wd_mults,
+            lr_multiplier_tree=mults,
+        )
         state = opt.init(params)
         grads = jtu.tree_map(lambda x: jnp.ones_like(x), params)
         updates, _ = opt.update(grads, state, params)
@@ -112,7 +148,8 @@ class TrainUtilityTest(TestCase):
         def sched(c: jax.Array) -> jax.Array:
             return jnp.asarray(0.1, dtype=jnp.float32) * c.astype(jnp.float32)
 
-        tx = _add_scheduled_decayed_weights(sched)
+        wd_mults = {"w": 1.0}
+        tx = _add_scaled_decayed_weights(sched, wd_mults)
         state = tx.init(params)
         u1, s1 = tx.update(grads, state, params)
         np.testing.assert_allclose(np.asarray(u1["w"]), np.array([1.0, 1.0], dtype=np.float32))
@@ -120,6 +157,66 @@ class TrainUtilityTest(TestCase):
         np.testing.assert_allclose(
             np.asarray(u2["w"]),
             np.array([1.0, 1.0], dtype=np.float32) + 0.1 * np.array([2.0, 3.0], dtype=np.float32),
+        )
+        self.assertEqual(int(s2.count), 2)
+
+    def test_scalar_decayed_weights_respects_wd_multipliers(self) -> None:
+        params = {"w": jnp.array([2.0], dtype=jnp.float32)}
+        grads = {"w": jnp.ones(1, dtype=jnp.float32)}
+        wd_mults = {"w": 0.5}
+        tx = _add_scaled_decayed_weights(0.1, wd_mults)
+        state = tx.init(params)
+        updates, new_state = tx.update(grads, state, params)
+        # g + wd * mult * param = 1 + 0.1 * 0.5 * 2 = 1.1
+        np.testing.assert_allclose(np.asarray(updates["w"]), np.array([1.1], dtype=np.float32))
+        self.assertIsInstance(new_state, optax.EmptyState)
+
+    def test_lora_product_decay_adds_correct_penalty(self) -> None:
+        class _LoRA(eqx.Module):
+            lora_down: jnp.ndarray
+            lora_up: jnp.ndarray
+
+        A = jnp.array([[1.0, 2.0], [3.0, 4.0]], dtype=jnp.float32)
+        B = jnp.array([[0.5], [1.5]], dtype=jnp.float32)
+        model = _LoRA(A, B)
+        params = eqx.filter(model, eqx.is_array)
+        grads = jtu.tree_map(jnp.ones_like, params)
+
+        wd, mult = 0.1, 1.0
+        tx = _add_lora_product_decay(wd, mult)
+        state = tx.init(params)
+        updates, _ = tx.update(grads, state, params)
+
+        coeff = wd * mult
+        exp_down = jnp.ones_like(A) + coeff * (A @ B @ B.T)
+        exp_up = jnp.ones_like(B) + coeff * (A.T @ A @ B)
+        np.testing.assert_allclose(np.asarray(updates.lora_down), np.asarray(exp_down), rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(updates.lora_up), np.asarray(exp_up), rtol=1e-5)
+
+    def test_lora_product_decay_advances_count_with_schedule(self) -> None:
+        class _LoRA(eqx.Module):
+            lora_down: jnp.ndarray
+            lora_up: jnp.ndarray
+
+        A = jnp.eye(2, dtype=jnp.float32)
+        B = jnp.ones((2, 1), dtype=jnp.float32)
+        model = _LoRA(A, B)
+        params = eqx.filter(model, eqx.is_array)
+        grads = jtu.tree_map(jnp.ones_like, params)
+
+        def sched(c: jax.Array) -> jax.Array:
+            return jnp.asarray(0.1, dtype=jnp.float32) * c.astype(jnp.float32)
+
+        tx = _add_lora_product_decay(sched, 1.0)
+        state = tx.init(params)
+        u1, s1 = tx.update(grads, state, params)
+        np.testing.assert_allclose(np.asarray(u1.lora_down), np.ones_like(A), rtol=1e-5)
+        u2, s2 = tx.update(grads, s1, params)
+        c = 0.1
+        np.testing.assert_allclose(
+            np.asarray(u2.lora_down),
+            np.asarray(jnp.ones_like(A) + c * (A @ B @ B.T)),
+            rtol=1e-5,
         )
         self.assertEqual(int(s2.count), 2)
 

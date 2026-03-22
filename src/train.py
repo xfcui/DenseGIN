@@ -41,29 +41,62 @@ def _attr_segment_names(path: tuple[Any, ...]) -> tuple[str, ...]:
 def lr_multiplier_for_param_path(path: tuple[Any, ...]) -> float:
     """Per-parameter LR scale relative to the global optimizer LR.
 
-    - 0.5×: atom embedding table and atom position encoder (``atom_embed``, ``atom_pos``).
-    - 4×: ConvKernel bond/degree embedding tensors; HeadKernel ``act_post`` only.
+    - 0.5×: ``ScaleLayer.scale``; ``HeadKernel`` readout scalars; atom embedding table and
+      atom position encoder (``atom_embed``, ``atom_pos``).
+    - 4×: ConvKernel bond/degree embedding tensors, LoRA factors; HeadKernel ``act_post`` only.
     """
     names = _attr_segment_names(path)
     if not names:
         return 1.0
+    leaf = names[-1]
+    if leaf in ("scale", "readout_scale", "readout_bias"):
+        return 0.5
     if names[0] in ("atom_embed", "atom_pos"):
         return 0.5
     if names[0] == "head":
         if "act_post" in names:
             return 4.0
     if "conv" in names:
-        if "embed_lora" in names:
+        if any(name in ("lora_down", "lora_up") for name in names):
             return 4.0
-        if names[-1] == "embeddings" and ("embed_edge" in names or "embed_deg" in names):
+        if leaf == "embeddings" and ("embed_edge" in names or "embed_deg" in names):
             return 4.0
     return 1.0
+
+
+def wd_multiplier_for_param_path(path: tuple[Any, ...]) -> float:
+    """Per-parameter weight-decay scale relative to the global WD (before scheduling).
+
+    - 1.0×: ``kernel`` (linear / grouped linear weights).
+    - 0.5×: embedding tables.
+    - 0.0×: ``scale``, ``bias``, readout scalars, ``lora_down`` / ``lora_up`` (product decay
+      is applied separately via :func:`_add_lora_product_decay`), and any unknown leaf names.
+    """
+    names = _attr_segment_names(path)
+    if not names:
+        return 0.0
+    leaf = names[-1]
+    if leaf in ("scale", "bias", "lora_down", "lora_up", "readout_scale", "readout_bias"):
+        return 0.0
+    if leaf == "embeddings":
+        return 0.5
+    if leaf == "kernel":
+        return 1.0
+    return 0.0
 
 
 def per_param_lr_multiplier_tree(params: Any) -> Any:
     """PyTree matching ``params`` with a positive float LR multiplier per array leaf."""
     return jtu.tree_map_with_path(
         lambda path, leaf: lr_multiplier_for_param_path(path),
+        params,
+    )
+
+
+def per_param_wd_multiplier_tree(params: Any) -> Any:
+    """PyTree matching ``params`` with a non-negative float WD multiplier per array leaf."""
+    return jtu.tree_map_with_path(
+        lambda path, leaf: wd_multiplier_for_param_path(path),
         params,
     )
 
@@ -117,45 +150,142 @@ def _make_wd_schedule(steps_per_epoch: int, k: int, peak_wd: float) -> Callable[
     return schedule
 
 
-def _add_scheduled_decayed_weights(
-    schedule_fn: Callable[[jax.Array], jax.Array],
-    mask: Any | None = None,
+def _add_scaled_decayed_weights(
+    weight_decay: float | Callable[[jax.Array], jax.Array],
+    wd_multiplier_tree: Any,
 ) -> optax.GradientTransformation:
-    """Like ``optax.add_decayed_weights(schedule)`` but increments step count each update.
+    """Add ``weight_decay * wd_mult * param`` to each gradient leaf.
 
-    Optax's built-in callable ``weight_decay`` path does not advance ``count``, so scheduled
-    decay would be stuck at step 0; this transformation matches the scalar path semantics.
+    Supports scalar ``weight_decay`` or a schedule ``count -> wd``; when a schedule is used,
+    step count is advanced each update (unlike optax's callable-``weight_decay`` path).
+
+    ``wd_multiplier_tree`` matches trainable params; multiplier ``0`` disables decay for that leaf.
     """
 
     def init_fn(params):
         del params
-        return optax.ScaleByScheduleState(count=jnp.zeros([], jnp.int32))
+        if callable(weight_decay):
+            return optax.ScaleByScheduleState(count=jnp.zeros([], jnp.int32))
+        return optax.EmptyState()
 
     def update_fn(updates, state, params):
         if params is None:
             raise ValueError(optax_base.NO_PARAMS_MSG)
-        s = schedule_fn(state.count)
+        if callable(weight_decay):
+            s = weight_decay(state.count)
+            new_state: Any = optax.ScaleByScheduleState(
+                count=optax.safe_int32_increment(state.count),
+            )
+        else:
+            s = jnp.asarray(weight_decay, dtype=jnp.float32)
+            new_state = state
+
+        def _scaled_decay(g, m, p):
+            if g is None:
+                return None
+            m_arr = jnp.asarray(m, dtype=p.dtype)
+            s_arr = jnp.astype(s, p.dtype)
+            return g + s_arr * m_arr * p
+
         new_updates = jax.tree.map(
-            lambda g, p: None if g is None else g + s * p,
+            _scaled_decay,
             updates,
+            wd_multiplier_tree,
             params,
             is_leaf=lambda x: x is None,
         )
-        return new_updates, optax.ScaleByScheduleState(
-            count=optax.safe_int32_increment(state.count),
-        )
+        return new_updates, new_state
 
-    inner = optax.GradientTransformation(init_fn, update_fn)
-    if mask is not None:
-        return optax.masked(inner, mask)
-    return inner
+    return optax.GradientTransformation(init_fn, update_fn)
+
+
+def _add_lora_product_decay(
+    weight_decay: float | Callable[[jax.Array], jax.Array],
+    lora_product_wd_multiplier: float,
+) -> optax.GradientTransformation:
+    """Add decoupled weight decay on ``lora_down @ lora_up`` for sibling LoRA pairs.
+
+    For each pair (A, B) = (``lora_down``, ``lora_up``), adds to gradients the terms from
+    ``(wd/2) * mult * ||A @ B||_F^2``, i.e. ``wd * mult * A @ B @ B.T`` on A and
+    ``wd * mult * A.T @ A @ B`` on B. Pairs are found by flattening the param tree with paths
+    and matching leaves whose final segment is ``lora_down`` / ``lora_up`` under the same parent.
+
+    Supports scalar ``weight_decay`` or a schedule ``count -> wd``; when a schedule is used,
+    step count is advanced each update (same pattern as :func:`_add_scaled_decayed_weights`).
+    """
+
+    def init_fn(params):
+        del params
+        if callable(weight_decay):
+            return optax.ScaleByScheduleState(count=jnp.zeros([], jnp.int32))
+        return optax.EmptyState()
+
+    def update_fn(updates, state, params):
+        if params is None:
+            raise ValueError(optax_base.NO_PARAMS_MSG)
+        if callable(weight_decay):
+            s = weight_decay(state.count)
+            new_state: Any = optax.ScaleByScheduleState(
+                count=optax.safe_int32_increment(state.count),
+            )
+        else:
+            s = jnp.asarray(weight_decay, dtype=jnp.float32)
+            new_state = state
+
+        mult = jnp.asarray(lora_product_wd_multiplier, dtype=jnp.float32)
+        coeff = jnp.astype(s, jnp.float32) * mult
+
+        pl_p, _treedef_p = jtu.tree_flatten_with_path(
+            params, is_leaf=lambda x: x is None
+        )
+        pl_u, treedef_u = jtu.tree_flatten_with_path(
+            updates, is_leaf=lambda x: x is None
+        )
+        paths_p = [p for p, _ in pl_p]
+        flat_p = [l for _, l in pl_p]
+        paths_u = [p for p, _ in pl_u]
+        flat_u = [l for _, l in pl_u]
+        if len(flat_p) != len(flat_u) or paths_p != paths_u or _treedef_p != treedef_u:
+            raise ValueError("params and updates must have identical pytree structure for LoRA WD")
+
+        parent_to_idx: dict[tuple[Any, ...], dict[str, int]] = {}
+        for i, path in enumerate(paths_p):
+            if not path:
+                continue
+            last = path[-1]
+            if isinstance(last, jtu.GetAttrKey) and last.name in ("lora_down", "lora_up"):
+                parent = path[:-1]
+                parent_to_idx.setdefault(parent, {})[last.name] = i
+
+        new_flat = list(flat_u)
+        for _parent, idx_map in parent_to_idx.items():
+            if "lora_down" not in idx_map or "lora_up" not in idx_map:
+                continue
+            i_d = idx_map["lora_down"]
+            i_u = idx_map["lora_up"]
+            A = flat_p[i_d]
+            B = flat_p[i_u]
+            g_d = new_flat[i_d]
+            g_u = new_flat[i_u]
+            if A is None or B is None or g_d is None or g_u is None:
+                continue
+            c = jnp.astype(coeff, A.dtype)
+            new_flat[i_d] = g_d + c * (A @ B @ B.T)
+            new_flat[i_u] = g_u + c * (A.T @ A @ B)
+
+        new_updates = jtu.tree_unflatten(treedef_u, new_flat)
+        return new_updates, new_state
+
+    return optax.GradientTransformation(init_fn, update_fn)
 
 
 def make_optimizer(
     learning_rate: float | Callable[[jax.Array], jax.Array],
     weight_decay: float | Callable[[jax.Array], jax.Array],
-    mask,
-    lr_multiplier_tree,
+    wd_multiplier_tree: Any,
+    lr_multiplier_tree: Any,
+    *,
+    lora_product_wd_multiplier: float = 0.5,
 ) -> optax.GradientTransformation:
     """Custom Adan-based optimizer with weight decay.
 
@@ -165,20 +295,21 @@ def make_optimizer(
     Args:
         learning_rate: Global learning rate (scalar or schedule ``count -> lr``).
         weight_decay: L2 regularisation coefficient (scalar or schedule).
-        mask: Optional pytree mask for weight_decay.
+        wd_multiplier_tree: PyTree matching trainable params; per-leaf multiplier for decay.
         lr_multiplier_tree: PyTree matching trainable params; each leaf is a positive
             float factor applied before ``scale_by_learning_rate``.
+        lora_product_wd_multiplier: Scale for ``||lora_down @ lora_up||_F^2`` decay relative
+            to global ``weight_decay`` (LoRA factors themselves use 0× in ``wd_multiplier_tree``).
 
     Returns:
         An optax.GradientTransformation implementing the optimizer chain.
     """
-    if callable(weight_decay):
-        wd_transform = _add_scheduled_decayed_weights(weight_decay, mask=mask)
-    else:
-        wd_transform = optax.add_decayed_weights(weight_decay=weight_decay, mask=mask)
+    wd_transform = _add_scaled_decayed_weights(weight_decay, wd_multiplier_tree)
+    lora_wd_transform = _add_lora_product_decay(weight_decay, lora_product_wd_multiplier)
     return optax.chain(
         optax.scale_by_adan(),
         wd_transform,
+        lora_wd_transform,
         optax.scale_by_learning_rate(learning_rate),
         _scale_updates_by_lr_multipliers(lr_multiplier_tree),
     )
@@ -369,17 +500,14 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
     model = get_model(model_key)
 
     params = eqx.filter(model, eqx.is_array)
-    mask = jtu.tree_map_with_path(
-        lambda path, _: path[-1].name == "kernel",
-        params,
-    ) if weight_decay > 0.0 else None
     lr_mult_tree = per_param_lr_multiplier_tree(params)
+    wd_mult_tree = per_param_wd_multiplier_tree(params)
 
     print(f"Using Adan optimizer with lr={learning_rate} and wd={weight_decay}")
     optimizer = make_optimizer(
         learning_rate=lr_sched,
         weight_decay=wd_sched,
-        mask=mask,
+        wd_multiplier_tree=wd_mult_tree,
         lr_multiplier_tree=lr_mult_tree,
     )
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
