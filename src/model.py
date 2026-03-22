@@ -1,3 +1,5 @@
+"""GNN model definitions for PCQM4Mv2: embeddings, conv/virt/depth/head kernels, and DenseGIN."""
+
 import jax
 import numpy as np
 import jax.numpy as jnp
@@ -34,13 +36,16 @@ def _split_or_none(key, num):
         return [None] * num
     return list(jax.random.split(key, num))
 
+
 def _inverse_softplus(y):
     """NumPy inverse softplus: ``x`` such that ``log(1 + exp(x)) == y`` (``y > 0``)."""
     return np.log(np.expm1(y))
 
+
 def _count_params(model: eqx.Module) -> int:
     """Count the number of parameters in an Equinox module."""
     return sum(x.size for x in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_array)))
+
 
 def _clip_with_grad(x, min, max):
     """Clamp with gradients that flow through unclipped regions."""
@@ -60,6 +65,7 @@ class EmbedLayer(eqx.Module):
         """Sum embedding lookups over the feature dimension."""
         return jnp.sum(self.embeddings[x], axis=-2)
 
+
 # ReZero: https://arxiv.org/abs/2003.04887
 # LayerScale: https://arxiv.org/abs/2103.17239
 class ScaleLayer(eqx.Module):
@@ -73,6 +79,7 @@ class ScaleLayer(eqx.Module):
         scale = _clip_with_grad(jnp.exp(self.scale), 1e-2, 1)
         return scale * x
 
+
 class LinearLayer(eqx.Module):
     """Bias-free linear projection with configurable init scale."""
     kernel: jnp.ndarray
@@ -83,6 +90,7 @@ class LinearLayer(eqx.Module):
 
     def __call__(self, x):
         return x @ self.kernel
+
 
 class ActLayer(eqx.Module):
     """Softplus activation with learnable bias shift and optional inverted dropout."""
@@ -114,7 +122,7 @@ class GroupLinearBlock(eqx.Module):
         width_norm = num_head * dim_head
         keys = _split_or_none(key, 2)
 
-        self.num_head  = num_head
+        self.num_head = num_head
         self.dim_head = dim_head
         self.linear = LinearLayer(width_in, width_norm, keys[0])
         assert width_out % num_head == 0
@@ -297,6 +305,7 @@ class VirtKernel(eqx.Module):
 
 
 class SelfMixerKernel(eqx.Module):
+    """Position-wise residual self-mixing block."""
     num_head: int = eqx.field(static=True)
     dim_head: int = eqx.field(static=True)
     act: GatedLinearBlock
@@ -312,6 +321,7 @@ class SelfMixerKernel(eqx.Module):
 
     def __call__(self, x, key=None):
         return self.sca(x) + self.act(x, key=key)
+
 
 class LayerMixerKernel(eqx.Module):
     """Mixes k-hop convolutions and virtual node information."""
@@ -359,6 +369,7 @@ class LayerMixerKernel(eqx.Module):
         xx = self.lin_post(xx + yy[batch])
         xx = self.sca_post(x) + xx
         return xx, virt
+
 
 class DepthMixerKernel(eqx.Module):
     """Cross-layer dense aggregation: projects all prior layer outputs and gates them into the current one."""
@@ -475,13 +486,11 @@ class DenseGIN(eqx.Module):
         print()
 
     def __call__(self, batch, training=False, key=None):
-        """
-        batch: flat dict from dataloader with keys:
-            node_feat (N_pad, 10), node_embd (N_pad, 17),
-            edgeX_feat (E_pad, 6/2/3/4), edgeX_index (2, E_pad),
-            edgeX_batch (E_pad,), node_batch (N_pad,),
-            batch_n_graphs (scalar)
-            where X in {"", "_2hop", "_3hop", "_4hop"} and graph index 0 is null.
+        """Forward pass over a padded batch dict produced by the dataloader.
+
+        Expected keys: ``node_feat`` (N_pad, 10), ``node_embd`` (N_pad, 17),
+        ``edgeX_{feat,index,batch}`` for X in ``{"", "_2hop", "_3hop", "_4hop"}``,
+        ``node_batch`` (N_pad,), ``batch_n_graphs`` (scalar); graph index 0 is null.
         """
         node_feat  = batch['node_feat']      # (N_pad, 10) int32
         node_embd  = batch['node_embd'][..., :EMBED_POS]      # (N_pad, 12)
@@ -518,7 +527,12 @@ class DenseGIN(eqx.Module):
         for suffix in EDGE_SUFFIXES:
             edge_index = batch[f'edge{suffix}_index']   # (2, E_pad)
             edge_attr  = batch[f'edge{suffix}_feat']    # (E_pad, num_bond_features)
-            deg = segment_sum(jnp.ones((batch[f'edge{suffix}_batch'].shape[0], 1), dtype=edge_index.dtype), edge_index[1], num_nodes).squeeze(-1).clip(1, None)
+            n_edges = batch[f'edge{suffix}_batch'].shape[0]
+            deg = segment_sum(
+                jnp.ones((n_edges, 1), dtype=edge_index.dtype),
+                edge_index[1],
+                num_nodes,
+            ).squeeze(-1).clip(1, None)
             edges.append((edge_index, edge_attr, deg))
         return edges
 

@@ -8,6 +8,7 @@ import importlib.util
 
 
 def _load_submodule(module_name: str, relative_path: str):
+    """Load a Python file as a named module, resolving its path relative to this file."""
     module_path = Path(__file__).resolve().parent / relative_path
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
@@ -45,6 +46,7 @@ __all__ = [
 
 
 def _parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the standalone dataloader smoke-test."""
     parser = argparse.ArgumentParser(
         description="Run one PCQM dataloader epoch and show progress."
     )
@@ -104,6 +106,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Iterate one dataloader epoch and report throughput via a tqdm progress bar."""
     args = _parse_args()
     from tqdm import tqdm
 

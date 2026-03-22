@@ -1,3 +1,5 @@
+"""Training loop, optimizer construction, and LR/WD schedules for PCQM4Mv2."""
+
 import sys
 from pathlib import Path
 
@@ -369,6 +371,7 @@ def get_jax_dataloader(
     shuffle: bool,
     drop_last: bool = False,
 ):
+    """Instantiate a ``PCQMDataloader`` for the given split and batch size."""
     dataset_root = _resolve_dataset_root(hdf5_path)
     dataset = PCQMDataset(dataset_root=dataset_root, split=split)
     return PCQMDataloader(
@@ -380,6 +383,7 @@ def get_jax_dataloader(
 
 
 def to_jax_batch(batch):
+    """Convert a dataloader batch to JAX arrays, keeping ``batch_n_graphs`` as a Python int."""
     converted = {}
     for k, v in batch.items():
         if k == "batch_n_graphs":
@@ -396,6 +400,7 @@ def _check_nan_loss(x: jax.Array) -> None:
 
 
 def loss_fn(model, batch, key, threshold=6e-2):
+    """MAE loss between model predictions and labels; key=None runs deterministic inference."""
     preds = model(batch, training=(key is not None), key=key)
     preds = preds.squeeze(-1)  # (B, 1) -> (B,)
     loss = jnp.mean(jnp.abs(preds - batch["labels"]))
@@ -431,6 +436,7 @@ def _train_one_epoch(
     learning_rate: float,
     weight_decay: float,
 ):
+    """Run one full training epoch and return updated model, opt state, key, and avg loss."""
     total_train_loss = 0.0
     num_train_batches = 0
     train_pbar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]")
@@ -454,6 +460,7 @@ def _train_one_epoch(
 
 
 def _validate_one_epoch(model, valid_loader, epoch: int) -> float:
+    """Run one full validation epoch and return the average MAE loss."""
     total_valid_loss = 0.0
     num_valid_batches = 0
     valid_pbar = tqdm(valid_loader, desc=f"Epoch {epoch} [Valid]")
@@ -476,6 +483,7 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
         num_epochs: Number of training epochs
         batch_size: Batch size
         learning_rate: Learning rate (peak learning rate if using warmup schedule)
+        weight_decay: L2 regularisation coefficient.
         model_save_path: Path to save the best model. Default: "results/best_model.eqx".
         scheduler_period: Period k for geometric LR scheduler. If None, use constant LR.
 
@@ -493,7 +501,7 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
     valid_loader = get_jax_dataloader(
         hdf5_path=hdf5_path,
         split='valid',
-        batch_size=batch_size*2,
+        batch_size=batch_size * 2,
         shuffle=False,
         drop_last=False,
     )
