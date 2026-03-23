@@ -72,8 +72,7 @@ class ScaleLayer(eqx.Module):
         self.scale = jnp.full((width,), np.log(scale_init), dtype=jnp.float32)
 
     def __call__(self, x):
-        scale = _clip_with_grad(jnp.exp(self.scale), 1e-2, 1)
-        return scale * x
+        return _clip_with_grad(jnp.exp(self.scale), 1e-2, 1) * x
 
 class LinearLayer(eqx.Module):
     """Bias-free linear projection with configurable init scale."""
@@ -97,13 +96,11 @@ class ActLayer(eqx.Module):
         """Apply activation, clip output range, and drop units when ``key`` is given."""
         xx = jax.nn.softplus(x + self.bias)
         xx = _clip_with_grad(xx, 1/MINMAX_RATIO, MINMAX_RATIO)
-        if key is None or DROPOUT <= 0.0:
-            return xx
-
-        keep = 1.0 - DROPOUT
-        mask = jax.random.bernoulli(key, p=keep, shape=xx.shape)
-        return xx * mask.astype(xx.dtype) / keep
-
+        if key is not None and DROPOUT > 0.0:
+            keep = 1.0 - DROPOUT
+            mask = jax.random.bernoulli(key, p=keep, shape=xx.shape)
+            xx = xx * mask.astype(xx.dtype) / keep
+        return xx
 
 class GroupLinearBlock(eqx.Module):
     """Groups-parallel linear: weight ``(num_head, d_in, d_out)``, no bias."""
@@ -128,7 +125,7 @@ class GroupLinearBlock(eqx.Module):
         xx = xx.reshape(*x.shape[:-1], self.num_head, -1)
         xx = xx / jnp.sqrt(jnp.mean(jnp.square(xx), axis=-1, keepdims=True) + EPSILON)
         if norm_bias is not None:
-            xx = (xx + norm_bias.reshape(xx.shape)) / 2**.5
+            xx = xx + norm_bias.reshape(xx.shape)
         xx = jnp.einsum("...hd,hdf->...hf", xx, self.kernel)
         xx = xx.reshape(*x.shape[:-1], -1)
         return xx
@@ -139,11 +136,11 @@ class GatedLinearBlock(eqx.Module):
     """Gated linear unit with group-linear and optional post-projection."""
     num_head: int
     dim_head: int
-    gate:   GroupLinearBlock
-    value:  GroupLinearBlock
-    act:    ActLayer
-    kernel: jnp.ndarray
-    linear: LinearLayer | None
+    lin_gat:  GroupLinearBlock
+    lin_val:  GroupLinearBlock
+    act_gat:  ActLayer
+    kernel:   jnp.ndarray
+    lin_out:  LinearLayer | None
 
     def __init__(self, width_in, width_out, num_head, dim_head, keep_groups=False, key=None, *, name=None):
         width_norm = num_head * dim_head
@@ -152,16 +149,16 @@ class GatedLinearBlock(eqx.Module):
 
         self.num_head = num_head
         self.dim_head = dim_head
-        self.gate  = GroupLinearBlock(width_in, width_act, num_head, dim_head, keys[0])
-        self.value = GroupLinearBlock(width_in, width_act, num_head, dim_head, keys[1])
-        self.act = ActLayer(width_act)
+        self.lin_gat  = GroupLinearBlock(width_in, width_act, num_head, dim_head, keys[0])
+        self.lin_val = GroupLinearBlock(width_in, width_act, num_head, dim_head, keys[1])
+        self.act_gat = ActLayer(width_act)
         if keep_groups:
             assert width_out % num_head == 0
             self.kernel = jax.random.normal(keys[2], (num_head, dim_head * WIDTH_ACT_SCALE, width_out // num_head)) / np.sqrt(dim_head * WIDTH_ACT_SCALE)
-            self.linear = None
+            self.lin_out = None
         else:
             self.kernel = jax.random.normal(keys[2], (num_head, dim_head * WIDTH_ACT_SCALE, dim_head)) / np.sqrt(dim_head * WIDTH_ACT_SCALE)
-            self.linear = LinearLayer(width_norm, width_out, keys[3])
+            self.lin_out = LinearLayer(width_norm, width_out, keys[3])
 
         if name is not None:
             print(f"##params[{name}]:", _count_params(self))
@@ -171,14 +168,14 @@ class GatedLinearBlock(eqx.Module):
         keys = _split_or_none(key, 1)
         y = x if y is None else y
 
-        gg = self.gate(x, gate_bias)
-        vv = self.value(y, value_bias)
-        xx = self.act(gg, keys[0]) * vv
+        gg = self.lin_gat(x, gate_bias)
+        vv = self.lin_val(y, value_bias)
+        xx = self.act_gat(gg, keys[0]) * vv
         xx = xx.reshape(*x.shape[:-1], self.num_head, -1)
         xx = jnp.einsum("...hd,hdf->...hf", xx, self.kernel)
         xx = xx.reshape(*x.shape[:-1], -1)
-        if self.linear is not None:
-            xx = self.linear(xx)
+        if self.lin_out is not None:
+            xx = self.lin_out(xx)
         return xx
 
 
@@ -216,9 +213,6 @@ class MoAct(eqx.Module):
         w = jax.nn.softplus(self.raw_weights)
         w = w / w.sum(axis=-1, keepdims=True)
         s = jax.nn.softplus(self.raw_scales)
-        if self.num_channels == 1:
-            w, s = w.squeeze(0), s.squeeze(0)
-            return fn(x[..., None] * s) @ w
         return (fn(x[..., None] * s) * w).sum(-1)
 
 class DiffEmbedLayer(eqx.Module):
@@ -288,12 +282,12 @@ class VirtKernel(eqx.Module):
 
         print("##params[virt]:", _count_params(self))
 
-    def __call__(self, x, virt, batch, batch_size, key=None):
+    def __call__(self, x, batch, batch_size, key=None):
         """Pool node features to graph-level, accumulate virtual state, and broadcast update."""
         msg = self.lin_pre(x)
-        msg = virt = segment_sum(msg, batch, batch_size) + virt
+        msg = segment_sum(msg, batch, batch_size)
         msg = self.act_post(msg, key=key)[batch]
-        return msg, virt
+        return msg
 
 
 class SelfMixerKernel(eqx.Module):
@@ -349,17 +343,16 @@ class LayerMixerKernel(eqx.Module):
 
         print("##params[layer_mixer]:", _count_params(self))
 
-    def __call__(self, x, virt, edges, batch, batch_size, node_elec, key=None):
+    def __call__(self, x, edges, batch, batch_size, node_elec, key=None):
         """Run multi-hop convolutions, mix with virtual-node broadcast, then residual-add."""
         keys = _split_or_none(key, len(self.conv) + 1)
 
         xx = self.lin_pre(x)
         for i, (conv, (idx, attr, deg)) in enumerate(zip(self.conv, edges)):
             xx = xx + conv(xx, deg, idx, attr, node_elec, key=keys[i])
-        yy, virt = self.act_virt(xx, virt, batch, batch_size, key=keys[-1])
-        xx = self.lin_post(xx + yy[batch])
-        xx = self.sca_post(x) + xx
-        return xx, virt
+        xx = xx + self.act_virt(xx, batch, batch_size, key=keys[-1])[batch]
+        xx = self.sca_post(x) + self.lin_post(xx)
+        return xx
 
 class DepthMixerKernel(eqx.Module):
     """Cross-layer dense aggregation: projects all prior layer outputs and gates them into the current one."""
@@ -398,32 +391,27 @@ class DepthMixerKernel(eqx.Module):
 class HeadKernel(eqx.Module):
     """Readout head: virtual + node pooling → scalar prediction."""
     num_head: int
-    act_pre:  GatedLinearBlock
-    act_virt: GatedLinearBlock
-    act_post: GatedLinearBlock
+    act_out:  GatedLinearBlock
     readout_scale: jnp.ndarray
-    readout_bias: jnp.ndarray
+    readout_bias:  jnp.ndarray
 
     def __init__(self, width, num_head, dim_head, key=None):
         width_norm = num_head * dim_head
-        keys = _split_or_none(key, 3)
+        keys = _split_or_none(key, 1)
 
         self.num_head = num_head
-        self.act_pre  = GatedLinearBlock(width, width_norm, num_head, dim_head, keep_groups=True, key=keys[0])
-        self.act_virt = GatedLinearBlock(width_norm, width_norm, num_head, dim_head, keep_groups=True, key=keys[1])
-        self.act_post = GatedLinearBlock(width_norm, 1, num_head*2, dim_head*2, key=keys[2])
+        self.act_out = GatedLinearBlock(width_norm, 1, num_head*2, dim_head*2, key=keys[0])
         self.readout_scale = jnp.asarray(1.162127, dtype=jnp.float32)
         self.readout_bias = jnp.asarray(5.689452, dtype=jnp.float32)
 
         print("##params[head]:", _count_params(self))
 
-    def __call__(self, x, virt, batch, batch_size, key=None):
+    def __call__(self, x, batch, batch_size, key=None):
         """Sum-pool nodes, fuse virtual node, project to scalar, and apply output affine."""
-        keys = _split_or_none(key, 3)
+        keys = _split_or_none(key, 1)
 
         yy = segment_sum(x, batch, batch_size)
-        yy = self.act_pre(yy, key=keys[0]) + self.act_virt(virt, key=keys[1])
-        yy = self.act_post(yy, key=keys[2])
+        yy = self.act_out(yy, key=keys[0])
         yy = yy * self.readout_scale + self.readout_bias
         return yy
 
@@ -443,13 +431,12 @@ class DuAxMPNN(eqx.Module):
     atom_pos:   GatedLinearBlock
     layer_mix:  tuple
     depth_mix:  tuple
-    final_mix:   SelfMixerKernel
     head: HeadKernel
 
     def __init__(self, depth, width, num_head, dim_head, key=None):
         if key is None:
             key = jax.random.PRNGKey(0)
-        keys = _split_or_none(key, depth * 2 + 4)
+        keys = _split_or_none(key, depth * 2 + 3)
 
         self.depth = depth
         self.width = width
@@ -470,7 +457,6 @@ class DuAxMPNN(eqx.Module):
             depth_mix.append(DepthMixerKernel(i+1, width, num_head, dim_head, key=keys[curr])); curr += 1
         self.layer_mix = tuple(layer_mix)  # type: ignore
         self.depth_mix = tuple(depth_mix)  # type: ignore
-        self.final_mix = SelfMixerKernel(width, num_head, dim_head, key=keys[curr]); curr += 1
         self.head = HeadKernel(width, num_head, dim_head, key=keys[curr])
 
         print("#params:", _count_params(self))
@@ -489,7 +475,7 @@ class DuAxMPNN(eqx.Module):
         graph_id   = batch['node_batch']     # (N_pad,)
         batch_size = batch['batch_n_graphs'] + 1
         edges = self._get_edge(batch)
-        keys = _split_or_none(key if training else None, self.depth * 2 + 2)
+        keys = _split_or_none(key if training else None, self.depth * 2 + 1)
         print("#kernel: nodes={}, {}".format(
             node_feat.shape[0],
             ", ".join(
@@ -502,13 +488,11 @@ class DuAxMPNN(eqx.Module):
         ))
 
         x, x_lst = self.atom_embed(node_feat) + jax.vmap(self.atom_pos)(node_embd) / 10, []
-        virt = jnp.zeros((1,), dtype=jnp.float32)
         for i in range(self.depth):
-            x, virt = self.layer_mix[i](x, virt, edges, graph_id, batch_size, node_elec, key=keys[i*2])
+            x = self.layer_mix[i](x, edges, graph_id, batch_size, node_elec, key=keys[i*2])
             x_lst = x_lst + [x]
             x = self.depth_mix[i](x, x_lst, key=keys[2*i+1])
-        x = self.final_mix(x, key=keys[-2])
-        y = self.head(x, virt, graph_id, batch_size, key=keys[-1])[1:]
+        y = self.head(x, graph_id, batch_size, key=keys[-1])[1:]
         return y
 
     def _get_edge(self, batch):

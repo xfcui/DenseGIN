@@ -45,7 +45,7 @@ def lr_multiplier_for_param_path(path: tuple[Any, ...]) -> float:
 
     - 0.5×: ``ScaleLayer.scale``; ``HeadKernel`` readout scalars; atom embedding table and
       atom position encoder (``atom_embed``, ``atom_pos``).
-    - 4×: ConvKernel bond/degree embedding tensors, LoRA factors; HeadKernel ``act_post`` only.
+    - 4×: ConvKernel bond/degree embedding tensors, LoRA factors; HeadKernel ``act_out`` only.
     """
     names = _attr_segment_names(path)
     if not names:
@@ -56,7 +56,7 @@ def lr_multiplier_for_param_path(path: tuple[Any, ...]) -> float:
     if names[0] in ("atom_embed", "atom_pos"):
         return 0.5
     if names[0] == "head":
-        if "act_post" in names:
+        if "act_out" in names:
             return 4.0
     if "conv" in names:
         if any(name in ("lora_down", "lora_up") for name in names):
@@ -129,11 +129,12 @@ def _make_lr_schedule(steps_per_epoch: int, k: int, peak_lr: float) -> Callable[
         period = jnp.floor(epoch_frac / k_f).astype(jnp.int32)
         t = jnp.fmod(epoch_frac, k_f) / k_f
         warmup = peak_lr * t
-        exp = jnp.maximum(period.astype(jnp.float32) - 1.0, 0.0)
+        constant = peak_lr
+        exp = jnp.maximum(period.astype(jnp.float32) - 2.0, 0.0)
         start = peak_lr / jnp.power(gr, exp)
         end = start / (gr * gr)
         cosine = end + 0.5 * (start - end) * (1.0 + jnp.cos(jnp.pi * t))
-        return jnp.where(period == 0, warmup, cosine)
+        return jnp.where(period == 0, warmup, jnp.where(period == 1, constant, cosine))
 
     return schedule
 
@@ -147,7 +148,11 @@ def _make_wd_schedule(steps_per_epoch: int, k: int, peak_wd: float) -> Callable[
         epoch_frac = count.astype(jnp.float32) / spe
         period = jnp.floor(epoch_frac / k_f).astype(jnp.int32)
         t = jnp.fmod(epoch_frac, k_f) / k_f
-        return jnp.where(period == 0, peak_wd * t, peak_wd)
+        wd_low = peak_wd / 100.0
+        p0 = wd_low
+        p1 = wd_low + (peak_wd - wd_low) * t
+        p2plus = peak_wd
+        return jnp.where(period == 0, p0, jnp.where(period == 1, p1, p2plus))
 
     return schedule
 
@@ -328,8 +333,8 @@ def get_scheduled_hparams(
     Args:
         epoch_fractional: Current fractional epoch (e.g., epoch + batch_idx / steps_per_epoch).
         k: Period length in epochs.
-        learning_rate: Peak learning rate (period-1 maximum).
-        weight_decay: Target weight decay.
+        learning_rate: Peak learning rate (held constant in period 1; cosine decay from period 2).
+        weight_decay: Target weight decay (ramped in period 1; constant from period 2).
 
     Returns:
         Tuple of (learning_rate, weight_decay) for this step.
@@ -340,12 +345,15 @@ def get_scheduled_hparams(
 
     if period == 0:
         current_lr = learning_rate * t
-        current_wd = weight_decay * t
+        current_wd = weight_decay / 100.0
+    elif period == 1:
+        current_lr = learning_rate
+        wd_low = weight_decay / 100.0
+        current_wd = wd_low + (weight_decay - wd_low) * t
     else:
-        # Cosine decay within period i (1-indexed i = period+1, maps to i-2 = period-1)
-        lr_start = learning_rate / gr ** (period - 1)
+        # Cosine decay: period N>=2 matches former period N-1 (exponent shift by -1)
+        lr_start = learning_rate / gr ** (period - 2)
         lr_end = lr_start / gr ** 2
-        # Cosine annealing from lr_start down to lr_end
         current_lr = lr_end + 0.5 * (lr_start - lr_end) * (1 + math.cos(math.pi * t))
         current_wd = weight_decay
 

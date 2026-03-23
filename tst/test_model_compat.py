@@ -39,7 +39,7 @@ DiffEmbedLayer = _MODEL_MODULE.DiffEmbedLayer
 EmbedLayer = _MODEL_MODULE.EmbedLayer
 LayerMixerKernel = _MODEL_MODULE.LayerMixerKernel
 MoAct = _MODEL_MODULE.MoAct
-SelfMixerKernel = _MODEL_MODULE.SelfMixerKernel
+HeadKernel = _MODEL_MODULE.HeadKernel
 get_model = _MODEL_MODULE.get_model
 
 PCQMDataset = _DATASET_MODULE.PCQMDataset
@@ -391,7 +391,7 @@ class ModelCompatibilityTest(unittest.TestCase):
         self.assertIsInstance(model.layer_mix[0], LayerMixerKernel)
         self.assertEqual(len(model.depth_mix), model.depth)
         self.assertIsInstance(model.depth_mix[0], DepthMixerKernel)
-        self.assertIsInstance(model.final_mix, SelfMixerKernel)
+        self.assertIsInstance(model.head, HeadKernel)
 
     def test_get_model_uses_stable_seed_when_none(self) -> None:
         model_a = get_model(None)

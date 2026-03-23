@@ -64,13 +64,13 @@ class TrainUtilityTest(TestCase):
         f = lr_multiplier_for_param_path
         self.assertEqual(f((GK("atom_embed"), GK("embeddings"))), 0.5)
         self.assertEqual(f((GK("atom_pos"), GK("kernel"))), 0.5)
-        self.assertEqual(f((GK("head"), GK("act_pre"), GK("gate"), GK("linear"), GK("kernel"))), 1.0)
-        self.assertEqual(f((GK("head"), GK("act_post"), GK("gate"), GK("kernel"))), 4.0)
+        self.assertEqual(f((GK("layer_mix"), GK("lin_post"), GK("kernel"))), 1.0)
+        self.assertEqual(f((GK("head"), GK("act_out"), GK("lin_gat"), GK("kernel"))), 4.0)
+        self.assertEqual(f((GK("head"), GK("act_out"), GK("lin_out"), GK("kernel"))), 4.0)
         self.assertEqual(f((GK("conv"), GK("0"), GK("lora_down"))), 4.0)
         self.assertEqual(f((GK("conv"), GK("0"), GK("lora_up"))), 4.0)
         self.assertEqual(f((GK("conv"), GK("0"), GK("embed_edge"), GK("embeddings"))), 4.0)
         self.assertEqual(f((GK("conv"), GK("0"), GK("lin_pre"), GK("kernel"))), 1.0)
-        self.assertEqual(f((GK("final_mix"), GK("sca"), GK("scale"))), 0.5)
         self.assertEqual(f((GK("head"), GK("readout_scale"))), 0.5)
         self.assertEqual(f((GK("head"), GK("readout_bias"))), 0.5)
         self.assertEqual(f((GK("layer_mix"), GK("0"), GK("sca_post"), GK("scale"))), 0.5)
@@ -80,12 +80,10 @@ class TrainUtilityTest(TestCase):
         GK = jtu.GetAttrKey
         f = wd_multiplier_for_param_path
         self.assertEqual(f((GK("atom_embed"), GK("embeddings"))), 0.5)
-        self.assertEqual(f((GK("head"), GK("act_pre"), GK("gate"), GK("linear"), GK("kernel"))), 1.0)
-        self.assertEqual(f((GK("head"), GK("act_post"), GK("gate"), GK("kernel"))), 1.0)
-        self.assertEqual(f((GK("head"), GK("act_post"), GK("act"), GK("bias"))), 0.0)
+        self.assertEqual(f((GK("head"), GK("act_out"), GK("lin_gat"), GK("kernel"))), 1.0)
+        self.assertEqual(f((GK("head"), GK("act_out"), GK("act_gat"), GK("bias"))), 0.0)
         self.assertEqual(f((GK("head"), GK("readout_scale"))), 0.0)
         self.assertEqual(f((GK("head"), GK("readout_bias"))), 0.0)
-        self.assertEqual(f((GK("final_mix"), GK("sca"), GK("scale"))), 0.0)
         self.assertEqual(f((GK("conv"), GK("0"), GK("lora_down"))), 0.0)
         self.assertEqual(f((GK("conv"), GK("0"), GK("lora_up"))), 0.0)
         self.assertEqual(f((GK("conv"), GK("0"), GK("embed_edge"), GK("embeddings"))), 0.5)
@@ -233,11 +231,12 @@ class TrainUtilityTest(TestCase):
 
         gr = (1 + math.sqrt(5)) / 2
         t = 0.5
-        period_one = 1
-        lr_start = base_lr / gr ** (period_one - 1)
+        # Cosine phases start at period index 2 (epoch >= 2*k)
+        period_cos = 2
+        lr_start = base_lr / gr ** (period_cos - 2)
         lr_end = lr_start / gr ** 2
         expected = lr_end + 0.5 * (lr_start - lr_end) * (1 + math.cos(math.pi * t))
-        lr, wd = get_scheduled_hparams(4.0 + 4.0 * t, k, base_lr, base_wd)
+        lr, wd = get_scheduled_hparams(8.0 + 4.0 * t, k, base_lr, base_wd)
         self.assertAlmostEqual(
             lr,
             expected,
@@ -248,11 +247,16 @@ class TrainUtilityTest(TestCase):
         base_lr = 0.0
         base_wd = 0.2
         k = 8
+        wd_low = base_wd / 100.0
         lr, wd = get_scheduled_hparams(0.0, k, base_lr, base_wd)
-        self.assertEqual(wd, 0.0)
+        self.assertAlmostEqual(wd, wd_low)
         lr, wd = get_scheduled_hparams(4.0, k, base_lr, base_wd)
-        self.assertAlmostEqual(wd, base_wd * 0.5)
+        self.assertAlmostEqual(wd, wd_low)
         lr, wd = get_scheduled_hparams(8.0, k, base_lr, base_wd)
+        self.assertAlmostEqual(wd, wd_low)
+        lr, wd = get_scheduled_hparams(12.0, k, base_lr, base_wd)
+        self.assertAlmostEqual(wd, wd_low + (base_wd - wd_low) * 0.5)
+        lr, wd = get_scheduled_hparams(16.0, k, base_lr, base_wd)
         self.assertAlmostEqual(wd, base_wd)
 
     def test_resolve_dataset_root_handles_processed_layout(self) -> None:
