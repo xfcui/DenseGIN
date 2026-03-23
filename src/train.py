@@ -552,19 +552,11 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
         )
         avg_valid_loss = _validate_one_epoch(model, valid_loader, epoch)
 
-        current_lr, current_wd = get_scheduled_hparams(
-            epoch + 1.0, scheduler_period, learning_rate, weight_decay
-        ) if scheduler_period is not None else (learning_rate, weight_decay)
-        msg = (
-            f"Epoch {epoch} | LR: {current_lr:.2e} | WD: {current_wd:.2e} | "
-            f"Train Loss: {avg_train_loss:.4f} | Valid Loss: {avg_valid_loss:.4f}"
-        )
-
+        msg = f"Epoch {epoch} | Train Loss: {avg_train_loss:.4f} | Valid Loss: {avg_valid_loss:.4f}"
         if avg_valid_loss < best_valid_loss:
+            eqx.tree_serialise_leaves(model_save_path, model)
             best_valid_loss = avg_valid_loss
             msg += " *"
-            eqx.tree_serialise_leaves(model_save_path, model)
-
         print(f"\r{msg}")
 
     print(f"Training complete. Best validation loss: {best_valid_loss:.4f}")

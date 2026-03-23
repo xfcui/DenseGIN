@@ -64,7 +64,7 @@ class TrainUtilityTest(TestCase):
         f = lr_multiplier_for_param_path
         self.assertEqual(f((GK("atom_embed"), GK("embeddings"))), 0.5)
         self.assertEqual(f((GK("atom_pos"), GK("kernel"))), 0.5)
-        self.assertEqual(f((GK("layer_mix"), GK("lin_post"), GK("kernel"))), 1.0)
+        self.assertEqual(f((GK("layer_mix"), GK("lin_out"), GK("kernel"))), 1.0)
         self.assertEqual(f((GK("head"), GK("act_out"), GK("lin_gat"), GK("kernel"))), 4.0)
         self.assertEqual(f((GK("head"), GK("act_out"), GK("lin_out"), GK("kernel"))), 4.0)
         self.assertEqual(f((GK("conv"), GK("0"), GK("lora_down"))), 4.0)
@@ -73,7 +73,7 @@ class TrainUtilityTest(TestCase):
         self.assertEqual(f((GK("conv"), GK("0"), GK("lin_pre"), GK("kernel"))), 1.0)
         self.assertEqual(f((GK("head"), GK("readout_scale"))), 0.5)
         self.assertEqual(f((GK("head"), GK("readout_bias"))), 0.5)
-        self.assertEqual(f((GK("layer_mix"), GK("0"), GK("sca_post"), GK("scale"))), 0.5)
+        self.assertEqual(f((GK("layer_mix"), GK("0"), GK("sca_out"), GK("scale"))), 0.5)
         self.assertEqual(f((GK("other"),)), 1.0)
 
     def test_wd_multiplier_for_param_path_rules(self) -> None:
