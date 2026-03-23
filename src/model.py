@@ -21,6 +21,7 @@ MINMAX_RATIO    = 20**.5
 WIDTH_ACT_SCALE = 4
 
 EMBED_POS  = 12    # RWPE12 only (ignore coord/en/geom auxiliaries)
+EMBED_ELEC = 2
 EDGE_SUFFIXES = list(EDGE_FEAT_VOCAB_SIZES.keys())
 EDGE_DIMS_PER_HOP = [
     (EDGE_FEAT_TOTAL_VOCAB[suffix], len(EDGE_FEAT_VOCAB_SIZES[suffix]))
@@ -250,7 +251,7 @@ class ConvKernel(eqx.Module):
         self.lora_down  = jax.random.normal(keys[4], (width, dim_head)) / np.sqrt(width)
         self.lora_up    = jnp.zeros((dim_head, width_norm), dtype=jnp.float32)
         self.embed_edge = EmbedLayer(edge_total_vocab, edge_num_features, dim_head, keys[0], init_std=0.01)
-        self.embed_elec = DiffEmbedLayer(2, dim_head, keys[5], init_std=0.01)
+        self.embed_elec = DiffEmbedLayer(EMBED_ELEC * 2, dim_head, keys[5], init_std=0.01)
         self.embed_deg  = EmbedLayer(6, 1, width_norm, keys[1], init_std=0.1)
         self.lin_pre    = LinearLayer(width, width_norm, keys[2])
         self.act_out    = GatedLinearBlock(width_norm, width_norm, num_head, dim_head, keep_groups=True, key=keys[3])
@@ -259,7 +260,9 @@ class ConvKernel(eqx.Module):
 
     def __call__(self, x, deg, edge_idx, edge_attr, node_elec, key=None):
         """Aggregate neighbor messages weighted by edge and degree embeddings."""
-        emb = node_elec[edge_idx[0]] - node_elec[edge_idx[1]]
+        emb = [node_elec[edge_idx[0]] - node_elec[edge_idx[1]],
+               node_elec[edge_idx[0]] + node_elec[edge_idx[1]]]
+        emb = jnp.concatenate(emb, axis=-1)  # (N_edges, 4)
         emb = self.embed_edge(edge_attr) + self.embed_elec(emb)
         msg = x[edge_idx[0]] + x[edge_idx[1]]
         msg = self.lin_pre(msg) + (msg @ self.lora_down * emb) @ self.lora_up
@@ -375,7 +378,7 @@ class DepthMixerKernel(eqx.Module):
             self.kernel = None
         self.act_out = GatedLinearBlock(width_cat, width, num_head, dim_head, key=keys[1])
 
-        print(f"##params[depth_mixer]:", _count_params(self))
+        print(f"##params[depth_mixer]:", _count_params(self), width_cat)
 
     def __call__(self, x, x_lst, key=None):
         """Gate current features against the sum of all previous layer outputs."""
@@ -393,35 +396,35 @@ class DepthMixerKernel(eqx.Module):
 
 class HeadKernel(eqx.Module):
     """Readout head: virtual + node pooling → scalar prediction."""
+    depth:    int
     num_head: int
-    lin_gat:  GroupLinearBlock
-    lin_val:  GroupLinearBlock
-    act_gat:  ActLayer
+    kernel:   jnp.ndarray
     act_out:  GatedLinearBlock
     readout_scale: jnp.ndarray
     readout_bias:  jnp.ndarray
 
-    def __init__(self, width, num_head, dim_head, key=None):
-        width_norm = num_head * dim_head * 2
+    def __init__(self, depth, width, num_head, dim_head, key=None):
+        width_neck = dim_head * num_head // 4
+        width_cat  = width + width_neck * depth
         keys = _split_or_none(key, 3)
 
+        self.depth = depth
         self.num_head = num_head
-        self.lin_gat  = GroupLinearBlock(width, width_norm, num_head, dim_head, key=keys[0])
-        self.lin_val  = GroupLinearBlock(width, width_norm, num_head, dim_head, key=keys[1])
-        self.act_gat  = ActLayer(width_norm)
-        self.act_out  = GatedLinearBlock(width_norm, 1, num_head*2, dim_head*2, key=keys[2])
+        self.kernel   = jax.random.normal(keys[0], (depth, width, width_neck)) / np.sqrt(width)
+        self.act_out  = GatedLinearBlock(width_cat, 1, num_head*2, dim_head*2, key=keys[2])
         self.readout_scale = jnp.asarray(1.162127, dtype=jnp.float32)
         self.readout_bias  = jnp.asarray(5.689452, dtype=jnp.float32)
 
-        print("##params[head]:", _count_params(self))
+        print("##params[head]:", _count_params(self), width_cat)
 
-    def __call__(self, x, batch, batch_size, key=None):
+    def __call__(self, x_lst, batch, batch_size, key=None):
         """Sum-pool nodes, fuse virtual node, project to scalar, and apply output affine."""
         keys = _split_or_none(key, 2)
 
-        gg = self.lin_gat(x)
-        vv = self.lin_val(x)
-        xx = self.act_gat(gg, key=keys[0]) * vv
+        xx = jnp.concatenate(x_lst, axis=-1)
+        xx = xx.reshape(*xx.shape[:-1], self.depth, -1)
+        xx = jnp.einsum("...hd,hdf->...hf", xx, self.kernel)
+        xx = xx.reshape(*xx.shape[:-2], -1)
         yy = segment_sum(xx, batch, batch_size)
         yy = self.act_out(yy, key=keys[1])
         yy = yy * self.readout_scale + self.readout_bias
@@ -466,10 +469,10 @@ class DuAxMPNN(eqx.Module):
         layer_mix, depth_mix = [], []
         for i in range(depth):
             layer_mix.append(LayerMixerKernel(width, num_head, dim_head, EDGE_DIMS_PER_HOP, key=keys[curr])); curr += 1
-            depth_mix.append(DepthMixerKernel(i + 1, width, num_head, dim_head, key=keys[curr])); curr += 1
+            depth_mix.append(DepthMixerKernel(i, width, num_head, dim_head, key=keys[curr])); curr += 1
         self.layer_mix = tuple(layer_mix)  # type: ignore
         self.depth_mix = tuple(depth_mix)  # type: ignore
-        self.head = HeadKernel(width, num_head, dim_head, key=keys[curr])
+        self.head = HeadKernel(depth, width, num_head, dim_head, key=keys[curr])
 
         print("#params:", _count_params(self))
         print()
@@ -483,7 +486,7 @@ class DuAxMPNN(eqx.Module):
         """
         node_feat  = batch['node_feat']      # (N_pad, 10) int32
         node_embd  = batch['node_embd'][..., :EMBED_POS]      # (N_pad, 12)
-        node_elec  = batch['node_embd'][..., -2:]      # (N_pad, 2)
+        node_elec  = batch['node_embd'][..., -EMBED_ELEC:]    # (N_pad, 2)
         graph_id   = batch['node_batch']     # (N_pad,)
         batch_size = batch['batch_n_graphs'] + 1
         edges = self._get_edge(batch)
@@ -499,12 +502,13 @@ class DuAxMPNN(eqx.Module):
             ),
         ))
 
-        x, x_lst = self.atom_embed(node_feat) + jax.vmap(self.atom_pos)(node_embd) / 10, []
+        x_depth, lst_layer, lst_depth = self.atom_embed(node_feat) + self.atom_pos(node_embd) / 10, [], []
         for i in range(self.depth):
-            x = self.layer_mix[i](x, edges, graph_id, batch_size, node_elec, key=keys[i*2])
-            x_lst = x_lst + [x]
-            x = self.depth_mix[i](x, x_lst, key=keys[2*i+1])
-        y = self.head(x, graph_id, batch_size, key=keys[-1])[1:]
+            x_layer = self.layer_mix[i](x_depth, edges, graph_id, batch_size, node_elec, key=keys[i*2])
+            lst_layer.append(x_layer)
+            x_depth = self.depth_mix[i](x_layer, lst_layer[:-1], key=keys[2*i+1])
+            lst_depth.append(x_depth)
+        y = self.head(x_depth, lst_depth[:-1], graph_id, batch_size, key=keys[-1])[1:]
         return y
 
     def _get_edge(self, batch):
@@ -527,4 +531,3 @@ class DuAxMPNN(eqx.Module):
 def get_model(key):
     """Create the default DuAxMPNN model (depth=5, width=256, heads=16)."""
     return DuAxMPNN(depth=5, width=256, num_head=16, dim_head=16, key=key)
-
