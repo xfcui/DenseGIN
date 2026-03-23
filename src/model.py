@@ -154,7 +154,7 @@ class GatedLinearBlock(eqx.Module):
     def __init__(self, width_in, width_out, num_head, dim_head, keep_groups=False, key=None, *, name=None):
         width_norm = num_head * dim_head
         width_act  = num_head * dim_head * WIDTH_ACT_SCALE
-        keys = _split_or_none(key, 4)
+        keys = _split_or_none(key, 3 if keep_groups else 4)
 
         self.num_head = num_head
         self.dim_head = dim_head
@@ -281,7 +281,6 @@ class ConvKernel(eqx.Module):
 class VirtKernel(eqx.Module):
     """Virtual node aggregation for global information exchange."""
     num_head: int
-    sca_pre:  ScaleLayer
     lin_pre:  LinearLayer
     act_post: GatedLinearBlock
 
@@ -290,7 +289,6 @@ class VirtKernel(eqx.Module):
         keys = _split_or_none(key, 2)
 
         self.num_head = num_head
-        self.sca_pre  = ScaleLayer(width_norm, scale_init=1.0)
         self.lin_pre  = LinearLayer(width, width_norm, keys[0])
         self.act_post = GatedLinearBlock(width_norm, width_norm, num_head, dim_head, keep_groups=True, key=keys[1])
 
@@ -299,7 +297,7 @@ class VirtKernel(eqx.Module):
     def __call__(self, x, virt, batch, batch_size, key=None):
         """Pool node features to graph-level, accumulate virtual state, and broadcast update."""
         msg = self.lin_pre(x)
-        msg = virt = segment_sum(msg, batch, batch_size) + self.sca_pre(virt)
+        msg = virt = segment_sum(msg, batch, batch_size) + virt
         msg = self.act_post(msg, key=key)[batch]
         return msg, virt
 
@@ -409,20 +407,20 @@ class DepthMixerKernel(eqx.Module):
 class HeadKernel(eqx.Module):
     """Readout head: virtual + node pooling → scalar prediction."""
     num_head: int
-    sca_pre:  ScaleLayer
-    lin_pre:  LinearLayer
+    act_pre:  GatedLinearBlock
+    act_virt: GatedLinearBlock
     act_post: GatedLinearBlock
     readout_scale: jnp.ndarray
     readout_bias: jnp.ndarray
 
     def __init__(self, width, num_head, dim_head, key=None):
         width_norm = num_head * dim_head
-        keys = _split_or_none(key, 2)
+        keys = _split_or_none(key, 3)
 
         self.num_head = num_head
-        self.sca_pre  = ScaleLayer(width_norm, scale_init=1.0)
-        self.lin_pre  = LinearLayer(width, width_norm, keys[0])
-        self.act_post = GatedLinearBlock(width_norm, 1, num_head*2, dim_head*2, key=keys[1])
+        self.act_pre  = GatedLinearBlock(width, width_norm, num_head, dim_head, keep_groups=True, key=keys[0])
+        self.act_virt = GatedLinearBlock(width_norm, width_norm, num_head, dim_head, keep_groups=True, key=keys[1])
+        self.act_post = GatedLinearBlock(width_norm, 1, num_head*2, dim_head*2, key=keys[2])
         self.readout_scale = jnp.asarray(1.162127, dtype=jnp.float32)
         self.readout_bias = jnp.asarray(5.689452, dtype=jnp.float32)
 
@@ -430,9 +428,10 @@ class HeadKernel(eqx.Module):
 
     def __call__(self, x, virt, batch, batch_size, key=None):
         """Sum-pool nodes, fuse virtual node, project to scalar, and apply output affine."""
-        xx = self.lin_pre(x)
-        yy = segment_sum(xx, batch, batch_size) + self.sca_pre(virt)
-        yy = self.act_post(yy, key=key)
+        keys = _split_or_none(key, 3)
+        yy = segment_sum(x, batch, batch_size)
+        yy = self.act_pre(yy, key=keys[0]) + self.act_virt(virt, key=keys[1])
+        yy = self.act_post(yy, key=keys[2])
         yy = yy * self.readout_scale + self.readout_bias
         return yy
 
@@ -498,7 +497,7 @@ class DenseGIN(eqx.Module):
         graph_id   = batch['node_batch']     # (N_pad,)
         batch_size = batch['batch_n_graphs'] + 1
         edges = self._get_edge(batch)
-        keys = _split_or_none(key if training else None, self.depth * 2 + 1)
+        keys = _split_or_none(key if training else None, self.depth * 2 + 2)
         print("#kernel: nodes={}, {}".format(
             node_feat.shape[0],
             ", ".join(
@@ -516,8 +515,8 @@ class DenseGIN(eqx.Module):
             x, virt = self.layer_mix[i](x, virt, edges, graph_id, batch_size, node_elec, key=keys[i*2])
             x_lst = x_lst + [x]
             x = self.depth_mix[i](x, x_lst, key=keys[2*i+1])
-        x = self.last_mix(x, key=keys[-1])
-        y = self.head(x, virt, graph_id, batch_size)[1:]
+        x = self.last_mix(x, key=keys[-2])
+        y = self.head(x, virt, graph_id, batch_size, key=keys[-1])[1:]
         return y
 
     def _get_edge(self, batch):
