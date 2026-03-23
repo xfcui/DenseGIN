@@ -1,6 +1,7 @@
 # Data and experiment artifacts
 /dataset/
 /results/
+/article/
 *.h5
 *.hdf5
 *.pkl

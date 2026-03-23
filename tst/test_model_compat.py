@@ -33,7 +33,7 @@ if _MODEL_SPEC is None or _MODEL_SPEC.loader is None:
 _MODEL_MODULE = importlib.util.module_from_spec(_MODEL_SPEC)
 _MODEL_SPEC.loader.exec_module(_MODEL_MODULE)  # type: ignore[arg-type]
 
-DenseGIN = _MODEL_MODULE.DenseGIN
+DuAxMPNN = _MODEL_MODULE.DuAxMPNN
 DepthMixerKernel = _MODEL_MODULE.DepthMixerKernel
 DiffEmbedLayer = _MODEL_MODULE.DiffEmbedLayer
 EmbedLayer = _MODEL_MODULE.EmbedLayer
@@ -121,10 +121,10 @@ def _dense_gin(
     width: int,
     num_head: int,
     key: jax.Array,
-) -> DenseGIN:
+) -> DuAxMPNN:
     if width % num_head != 0:
         raise ValueError("width must be divisible by num_head")
-    return DenseGIN(
+    return DuAxMPNN(
         depth=depth,
         width=width,
         num_head=num_head,
@@ -382,7 +382,7 @@ class ModelCompatibilityTest(unittest.TestCase):
 
     def test_get_model_matches_expected_default_config(self) -> None:
         model = get_model(None)
-        self.assertIsInstance(model, DenseGIN)
+        self.assertIsInstance(model, DuAxMPNN)
         self.assertEqual(model.depth, 5)
         self.assertEqual(model.width, 256)
         self.assertEqual(model.num_head, 16)
@@ -391,7 +391,7 @@ class ModelCompatibilityTest(unittest.TestCase):
         self.assertIsInstance(model.layer_mix[0], LayerMixerKernel)
         self.assertEqual(len(model.depth_mix), model.depth)
         self.assertIsInstance(model.depth_mix[0], DepthMixerKernel)
-        self.assertIsInstance(model.last_mix, SelfMixerKernel)
+        self.assertIsInstance(model.final_mix, SelfMixerKernel)
 
     def test_get_model_uses_stable_seed_when_none(self) -> None:
         model_a = get_model(None)
@@ -406,7 +406,7 @@ class ModelCompatibilityTest(unittest.TestCase):
     def test_get_model_output_is_finite_and_matches_explicit_ctor(self) -> None:
         batch = _make_minimal_batch()
         model_default = get_model(None)
-        model_explicit = DenseGIN(
+        model_explicit = DuAxMPNN(
             depth=5,
             width=256,
             num_head=16,

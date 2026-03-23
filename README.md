@@ -31,7 +31,7 @@ src/
     graph.py        # RWPE, k-hop edges, Gasteiger, electronegativity
     hdf5.py         # HDF5 save/load helpers
   dataset.py        # Compatibility re-export of PCQMDataset / PCQMDataloader
-  model.py          # DenseGIN architecture (Equinox)
+  model.py          # DuAxMPNN architecture (Equinox)
   train.py          # Training loop (Adan optimizer + geometric LR schedule)
 tst/
   test_dataset_and_dataloader.py
@@ -72,7 +72,7 @@ Trains for `scheduler_period²` epochs using an **Adan** optimizer with a geomet
 
 ## Model
 
-`DenseGIN` (`src/model.py`) with default hyperparameters `depth=5, width=256, num_head=16, dim_head=16`.
+`DuAxMPNN` (`src/model.py`) with default hyperparameters `depth=5, width=256, num_head=16, dim_head=16`.
 
 | Stage | Component | Notes |
 |---|---|---|

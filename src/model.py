@@ -1,4 +1,4 @@
-"""GNN model definitions for PCQM4Mv2: embeddings, conv/virt/depth/head kernels, and DenseGIN."""
+"""GNN model definitions for PCQM4Mv2: embeddings, conv/virt/depth/head kernels, and DuAxMPNN."""
 
 import jax
 import numpy as np
@@ -36,16 +36,13 @@ def _split_or_none(key, num):
         return [None] * num
     return list(jax.random.split(key, num))
 
-
 def _inverse_softplus(y):
     """NumPy inverse softplus: ``x`` such that ``log(1 + exp(x)) == y`` (``y > 0``)."""
     return np.log(np.expm1(y))
 
-
 def _count_params(model: eqx.Module) -> int:
     """Count the number of parameters in an Equinox module."""
     return sum(x.size for x in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_array)))
-
 
 def _clip_with_grad(x, min, max):
     """Clamp with gradients that flow through unclipped regions."""
@@ -65,7 +62,6 @@ class EmbedLayer(eqx.Module):
         """Sum embedding lookups over the feature dimension."""
         return jnp.sum(self.embeddings[x], axis=-2)
 
-
 # ReZero: https://arxiv.org/abs/2003.04887
 # LayerScale: https://arxiv.org/abs/2103.17239
 class ScaleLayer(eqx.Module):
@@ -79,7 +75,6 @@ class ScaleLayer(eqx.Module):
         scale = _clip_with_grad(jnp.exp(self.scale), 1e-2, 1)
         return scale * x
 
-
 class LinearLayer(eqx.Module):
     """Bias-free linear projection with configurable init scale."""
     kernel: jnp.ndarray
@@ -90,7 +85,6 @@ class LinearLayer(eqx.Module):
 
     def __call__(self, x):
         return x @ self.kernel
-
 
 class ActLayer(eqx.Module):
     """Softplus activation with learnable bias shift and optional inverted dropout."""
@@ -320,7 +314,6 @@ class SelfMixerKernel(eqx.Module):
     def __call__(self, x, key=None):
         return self.sca(x) + self.act(x, key=key)
 
-
 class LayerMixerKernel(eqx.Module):
     """Mixes k-hop convolutions and virtual node information."""
     num_head: int = eqx.field(static=True)
@@ -368,7 +361,6 @@ class LayerMixerKernel(eqx.Module):
         xx = self.sca_post(x) + xx
         return xx, virt
 
-
 class DepthMixerKernel(eqx.Module):
     """Cross-layer dense aggregation: projects all prior layer outputs and gates them into the current one."""
     num_head: int
@@ -403,7 +395,6 @@ class DepthMixerKernel(eqx.Module):
         xx = self.act_post(x, sum(x_lst), key=keys[0])
         return xx
 
-
 class HeadKernel(eqx.Module):
     """Readout head: virtual + node pooling → scalar prediction."""
     num_head: int
@@ -429,6 +420,7 @@ class HeadKernel(eqx.Module):
     def __call__(self, x, virt, batch, batch_size, key=None):
         """Sum-pool nodes, fuse virtual node, project to scalar, and apply output affine."""
         keys = _split_or_none(key, 3)
+
         yy = segment_sum(x, batch, batch_size)
         yy = self.act_pre(yy, key=keys[0]) + self.act_virt(virt, key=keys[1])
         yy = self.act_post(yy, key=keys[2])
@@ -439,8 +431,8 @@ class HeadKernel(eqx.Module):
 # GIN: https://openreview.net/forum?id=ryGs6iA5Km
 # DenseNet: https://arxiv.org/abs/1608.06993
 # AttnRes: https://arxiv.org/abs/2603.15031
-class DenseGIN(eqx.Module):
-    """DenseGIN for PCQM4Mv2: 19-feature atoms, 6-feature bonds, 8-step RWPE."""
+class DuAxMPNN(eqx.Module):
+    """DuAxMPNN for PCQM4Mv2: 19-feature atoms, 6-feature bonds, 8-step RWPE."""
     depth: int
     width: int
     num_head: int
@@ -451,7 +443,7 @@ class DenseGIN(eqx.Module):
     atom_pos:   GatedLinearBlock
     layer_mix:  tuple
     depth_mix:  tuple
-    last_mix:   SelfMixerKernel
+    final_mix:   SelfMixerKernel
     head: HeadKernel
 
     def __init__(self, depth, width, num_head, dim_head, key=None):
@@ -478,7 +470,7 @@ class DenseGIN(eqx.Module):
             depth_mix.append(DepthMixerKernel(i+1, width, num_head, dim_head, key=keys[curr])); curr += 1
         self.layer_mix = tuple(layer_mix)  # type: ignore
         self.depth_mix = tuple(depth_mix)  # type: ignore
-        self.last_mix = SelfMixerKernel(width, num_head, dim_head, key=keys[curr]); curr += 1
+        self.final_mix = SelfMixerKernel(width, num_head, dim_head, key=keys[curr]); curr += 1
         self.head = HeadKernel(width, num_head, dim_head, key=keys[curr])
 
         print("#params:", _count_params(self))
@@ -515,7 +507,7 @@ class DenseGIN(eqx.Module):
             x, virt = self.layer_mix[i](x, virt, edges, graph_id, batch_size, node_elec, key=keys[i*2])
             x_lst = x_lst + [x]
             x = self.depth_mix[i](x, x_lst, key=keys[2*i+1])
-        x = self.last_mix(x, key=keys[-2])
+        x = self.final_mix(x, key=keys[-2])
         y = self.head(x, virt, graph_id, batch_size, key=keys[-1])[1:]
         return y
 
@@ -537,5 +529,6 @@ class DenseGIN(eqx.Module):
 
 
 def get_model(key):
-    """Create the default DenseGIN model (depth=5, width=256, heads=16)."""
-    return DenseGIN(depth=5, width=256, num_head=16, dim_head=16, key=key)
+    """Create the default DuAxMPNN model (depth=5, width=256, heads=16)."""
+    return DuAxMPNN(depth=5, width=256, num_head=16, dim_head=16, key=key)
+
