@@ -417,14 +417,18 @@ class HeadKernel(eqx.Module):
 
         print("##params[head]:", _count_params(self), width_cat)
 
-    def __call__(self, x_lst, batch, batch_size, key=None):
+    def __call__(self, x, x_lst, batch, batch_size, key=None):
         """Sum-pool nodes, fuse virtual node, project to scalar, and apply output affine."""
         keys = _split_or_none(key, 2)
 
-        xx = jnp.concatenate(x_lst, axis=-1)
-        xx = xx.reshape(*xx.shape[:-1], self.depth, -1)
-        xx = jnp.einsum("...hd,hdf->...hf", xx, self.kernel)
-        xx = xx.reshape(*xx.shape[:-2], -1)
+        if self.depth == 0:
+            xx = x
+        else:
+            xx = jnp.concatenate(x_lst, axis=-1)
+            xx = xx.reshape(*x.shape[:-1], self.depth, -1)
+            xx = jnp.einsum("...hd,hdf->...hf", xx, self.kernel)
+            xx = xx.reshape(*x.shape[:-1], -1)
+            xx = jnp.concatenate([xx, x], axis=-1)
         yy = segment_sum(xx, batch, batch_size)
         yy = self.act_out(yy, key=keys[1])
         yy = yy * self.readout_scale + self.readout_bias
@@ -472,7 +476,7 @@ class DuAxMPNN(eqx.Module):
             depth_mix.append(DepthMixerKernel(i, width, num_head, dim_head, key=keys[curr])); curr += 1
         self.layer_mix = tuple(layer_mix)  # type: ignore
         self.depth_mix = tuple(depth_mix)  # type: ignore
-        self.head = HeadKernel(depth, width, num_head, dim_head, key=keys[curr])
+        self.head = HeadKernel(depth - 1, width, num_head, dim_head, key=keys[curr])
 
         print("#params:", _count_params(self))
         print()

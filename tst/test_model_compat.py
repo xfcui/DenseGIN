@@ -392,6 +392,7 @@ class ModelCompatibilityTest(unittest.TestCase):
         self.assertEqual(len(model.depth_mix), model.depth)
         self.assertIsInstance(model.depth_mix[0], DepthMixerKernel)
         self.assertIsInstance(model.head, HeadKernel)
+        self.assertEqual(model.head.depth, model.depth - 1)
 
     def test_get_model_uses_stable_seed_when_none(self) -> None:
         model_a = get_model(None)
