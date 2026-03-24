@@ -148,7 +148,7 @@ def _make_wd_schedule(steps_per_epoch: int, k: int, peak_wd: float) -> Callable[
         epoch_frac = count.astype(jnp.float32) / spe
         period = jnp.floor(epoch_frac / k_f).astype(jnp.int32)
         t = jnp.fmod(epoch_frac, k_f) / k_f
-        wd_low = peak_wd / 100.0
+        wd_low = peak_wd / 1000.0
         p0 = wd_low
         p1 = wd_low + (peak_wd - wd_low) * t
         p2plus = peak_wd
@@ -345,10 +345,10 @@ def get_scheduled_hparams(
 
     if period == 0:
         current_lr = learning_rate * t
-        current_wd = weight_decay / 100.0
+        current_wd = weight_decay / 1000.0
     elif period == 1:
         current_lr = learning_rate
-        wd_low = weight_decay / 100.0
+        wd_low = weight_decay / 1000.0
         current_wd = wd_low + (weight_decay - wd_low) * t
     else:
         # Cosine decay: period N>=2 matches former period N-1 (exponent shift by -1)
@@ -378,6 +378,7 @@ def get_jax_dataloader(
     batch_size: int,
     shuffle: bool,
     drop_last: bool = False,
+    seed: int | None = None,
 ):
     """Instantiate a ``PCQMDataloader`` for the given split and batch size."""
     dataset_root = _resolve_dataset_root(hdf5_path)
@@ -387,6 +388,7 @@ def get_jax_dataloader(
         batch_size=batch_size,
         shuffle=shuffle,
         drop_last=drop_last,
+        seed=seed,
     )
 
 
@@ -483,7 +485,8 @@ def _validate_one_epoch(model, valid_loader, epoch: int) -> float:
 
 def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
           model_save_path="results/best_model.eqx",
-          scheduler_period=None):
+          scheduler_period=None,
+          seed: int = 0):
     """
     Train the GNN model on PCQM4Mv2 dataset.
 
@@ -494,6 +497,7 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
         weight_decay: L2 regularisation coefficient.
         model_save_path: Path to save the best model. Default: "results/best_model.eqx".
         scheduler_period: Period k for geometric LR scheduler. If None, use constant LR.
+        seed: RNG seed for model init, training minibatch order (via dataloader), and dropout.
 
     Returns:
         Trained model
@@ -504,7 +508,8 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
         split='train',
         batch_size=batch_size,
         shuffle=True,
-        drop_last=True
+        drop_last=True,
+        seed=seed,
     )
     valid_loader = get_jax_dataloader(
         hdf5_path=hdf5_path,
@@ -522,7 +527,7 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
         lr_sched, wd_sched = learning_rate, weight_decay
 
     # Initialize model
-    key = jax.random.PRNGKey(0)
+    key = jax.random.PRNGKey(int(seed))
     model_key, train_key = jax.random.split(key)
     model = get_model(model_key)
 
@@ -571,6 +576,7 @@ if __name__ == "__main__":
     parser.add_argument('--weight_decay', type=float, default=2e-2)
     parser.add_argument('--scheduler_period', type=int, default=8, help='Period for geometric LR scheduler')
     parser.add_argument('--model_save_path', type=str, default="results/best_model.eqx", help='Path to save the best model')
+    parser.add_argument('--seed', type=int, default=0, help='Random seed for init, training shuffle, and dropout')
     args = parser.parse_args()
 
     train(
@@ -579,5 +585,6 @@ if __name__ == "__main__":
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         model_save_path=args.model_save_path,
-        scheduler_period=args.scheduler_period
+        scheduler_period=args.scheduler_period,
+        seed=args.seed,
     )

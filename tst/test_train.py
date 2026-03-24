@@ -247,7 +247,7 @@ class TrainUtilityTest(TestCase):
         base_lr = 0.0
         base_wd = 0.2
         k = 8
-        wd_low = base_wd / 100.0
+        wd_low = base_wd / 1000.0
         lr, wd = get_scheduled_hparams(0.0, k, base_lr, base_wd)
         self.assertAlmostEqual(wd, wd_low)
         lr, wd = get_scheduled_hparams(4.0, k, base_lr, base_wd)
@@ -374,10 +374,25 @@ class TrainLoopTest(TestCase):
         self.assertEqual(captured["batch_size"], 7)
         self.assertTrue(captured["shuffle"])
         self.assertFalse(captured["drop_last"])
+        self.assertIsNone(captured["seed"])
         self.assertEqual(captured["pad_to_multiple"], 28)
 
+        with (
+            patch.object(TRAIN, "PCQMDataset", FakeDataset),
+            patch.object(TRAIN, "PCQMDataloader", FakeLoader),
+        ):
+            get_jax_dataloader(
+                expected_root / "processed",
+                split="valid",
+                batch_size=3,
+                shuffle=False,
+                drop_last=True,
+                seed=99,
+            )
+        self.assertEqual(captured["seed"], 99)
+
     def test_train_uses_doubled_batch_size_for_valid_dataloader(self) -> None:
-        recorded: list[tuple[str, int, bool, bool]] = []
+        recorded: list[tuple[str, int, bool, bool, int | None]] = []
 
         class FakeLoader:
             def __iter__(self):
@@ -387,9 +402,9 @@ class TrainLoopTest(TestCase):
                 return 1
 
         def capture_loaders(
-            hdf5_path, split, batch_size, shuffle, drop_last=False, *args, **kwargs
+            hdf5_path, split, batch_size, shuffle, drop_last=False, seed=None, **kwargs
         ):
-            recorded.append((split, batch_size, shuffle, drop_last))
+            recorded.append((split, batch_size, shuffle, drop_last, seed))
             return FakeLoader()
 
         with TemporaryDirectory() as temp_dir:
@@ -410,8 +425,8 @@ class TrainLoopTest(TestCase):
         self.assertEqual(
             recorded,
             [
-                ("train", 9, True, True),
-                ("valid", 18, False, False),
+                ("train", 9, True, True, 0),
+                ("valid", 18, False, False, None),
             ],
         )
 
@@ -451,7 +466,7 @@ class TrainLoopTest(TestCase):
                 return batch["labels"].reshape(-1, 1) * self.weight
 
         def fake_get_jax_dataloader(
-            hdf5_path, split, batch_size, shuffle, drop_last=False, *args, **kwargs
+            hdf5_path, split, batch_size, shuffle, drop_last=False, seed=None, **kwargs
         ):
             if split == "train":
                 return train_loader
