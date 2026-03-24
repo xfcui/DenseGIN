@@ -254,10 +254,13 @@ class TrainUtilityTest(TestCase):
         self.assertAlmostEqual(wd, wd_low)
         lr, wd = get_scheduled_hparams(8.0, k, base_lr, base_wd)
         self.assertAlmostEqual(wd, wd_low)
+        # Warmup ends at 1.5 * k = 12; cosine cycles length k from there.
         lr, wd = get_scheduled_hparams(12.0, k, base_lr, base_wd)
-        self.assertAlmostEqual(wd, wd_low + (base_wd - wd_low) * 0.5)
+        self.assertAlmostEqual(wd, wd_low)
         lr, wd = get_scheduled_hparams(16.0, k, base_lr, base_wd)
         self.assertAlmostEqual(wd, base_wd)
+        lr, wd = get_scheduled_hparams(20.0, k, base_lr, base_wd)
+        self.assertAlmostEqual(wd, wd_low)
 
     def test_resolve_dataset_root_handles_processed_layout(self) -> None:
         with TemporaryDirectory() as temp_dir:

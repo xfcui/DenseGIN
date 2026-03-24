@@ -244,16 +244,16 @@ class ConvKernel(eqx.Module):
     lin_pre:    LinearLayer
     act_out:    GatedLinearBlock
 
-    def __init__(self, width, num_head, dim_head, edge_total_vocab, edge_num_features, key=None):
+    def __init__(self, num_head, dim_head, edge_total_vocab, edge_num_features, key=None):
         width_norm = num_head * dim_head
         keys = _split_or_none(key, 6)
 
-        self.lora_down  = jax.random.normal(keys[4], (width, dim_head)) / np.sqrt(width)
+        self.lora_down  = jax.random.normal(keys[4], (width_norm, dim_head)) / np.sqrt(width_norm)
         self.lora_up    = jnp.zeros((dim_head, width_norm), dtype=jnp.float32)
         self.embed_edge = EmbedLayer(edge_total_vocab, edge_num_features, dim_head, keys[0], init_std=0.01)
         self.embed_elec = DiffEmbedLayer(EMBED_ELEC * 2, dim_head, keys[5], init_std=0.01)
         self.embed_deg  = EmbedLayer(6, 1, width_norm, keys[1], init_std=0.1)
-        self.lin_pre    = LinearLayer(width, width_norm, keys[2])
+        self.lin_pre    = LinearLayer(width_norm, width_norm, keys[2])
         self.act_out    = GatedLinearBlock(width_norm, width_norm, num_head, dim_head, keep_groups=True, key=keys[3])
 
         print(f"##params[conv]:", _count_params(self), edge_total_vocab, edge_num_features)
@@ -276,7 +276,7 @@ class VirtKernel(eqx.Module):
     num_head: int
     act_out:  GatedLinearBlock
 
-    def __init__(self, width, num_head, dim_head, key=None):
+    def __init__(self, num_head, dim_head, key=None):
         width_norm = num_head * dim_head
         keys = _split_or_none(key, 2)
 
@@ -330,7 +330,6 @@ class LayerMixerKernel(eqx.Module):
         self.lin_pre  = GroupLinearBlock(width, width_norm, num_head, dim_head, keys[0])
         self.conv = tuple(
             ConvKernel(
-                width_norm,
                 num_head,
                 dim_head,
                 edge_dims_per_hop[i][0],
@@ -339,7 +338,7 @@ class LayerMixerKernel(eqx.Module):
             )
             for i in range(num_hops)
         )
-        self.act_virt = VirtKernel(width_norm, num_head, dim_head, key=keys[1])
+        self.act_virt = VirtKernel(num_head, dim_head, key=keys[1])
         self.lin_out = LinearLayer(width_norm, width, keys[2], init_std=1/(1 + (num_hops + 1) * .75**2)**.5)
         self.sca_out = ScaleLayer(width, scale_init=1.0)
 
@@ -358,7 +357,6 @@ class LayerMixerKernel(eqx.Module):
 
 class DepthMixerKernel(eqx.Module):
     """Cross-layer dense aggregation: projects all prior layer outputs and gates them into the current one."""
-    depth: int
     num_head: int
     dim_head: int
     kernel:   jnp.ndarray | None
@@ -369,7 +367,6 @@ class DepthMixerKernel(eqx.Module):
         width_cat  = width + width_neck * depth
         keys = _split_or_none(key, 2)
 
-        self.depth = depth
         self.num_head = num_head
         self.dim_head = dim_head
         if depth > 0:
@@ -382,22 +379,22 @@ class DepthMixerKernel(eqx.Module):
 
     def __call__(self, x, x_lst, key=None):
         """Gate current features against the sum of all previous layer outputs."""
-        if self.kernel is not None:
+        if self.kernel is None:
+            xx = x
+        else:
             xx = jnp.concatenate(x_lst, axis=-1)
-            xx = xx.reshape(*x.shape[:-1], self.depth, -1)
+            xx = xx.reshape(*x.shape[:-1], -1, x.shape[-1])
             xx = jnp.einsum("...hd,hdf->...hf", xx, self.kernel)
             xx = xx.reshape(*x.shape[:-1], -1)
-            xx = jnp.concatenate([xx, x], axis=-1)
-        else:
-            xx = x
+            xx = jnp.concatenate([x, xx], axis=-1)
         xx = self.act_out(xx, key=key)
         return xx
 
 
 class HeadKernel(eqx.Module):
     """Readout head: virtual + node pooling → scalar prediction."""
-    depth:    int
     num_head: int
+    dim_head: int
     kernel:   jnp.ndarray
     act_out:  GatedLinearBlock
     readout_scale: jnp.ndarray
@@ -408,8 +405,8 @@ class HeadKernel(eqx.Module):
         width_cat  = width + width_neck * depth
         keys = _split_or_none(key, 3)
 
-        self.depth = depth
         self.num_head = num_head
+        self.dim_head = dim_head
         self.kernel   = jax.random.normal(keys[0], (depth, width, width_neck)) / np.sqrt(width)
         self.act_out  = GatedLinearBlock(width_cat, 1, num_head*2, dim_head*2, key=keys[2])
         self.readout_scale = jnp.asarray(1.162127, dtype=jnp.float32)
@@ -419,18 +416,16 @@ class HeadKernel(eqx.Module):
 
     def __call__(self, x, x_lst, batch, batch_size, key=None):
         """Sum-pool nodes, fuse virtual node, project to scalar, and apply output affine."""
-        keys = _split_or_none(key, 2)
-
-        if self.depth == 0:
+        if self.kernel.shape[0] == 0:
             xx = x
         else:
             xx = jnp.concatenate(x_lst, axis=-1)
-            xx = xx.reshape(*x.shape[:-1], self.depth, -1)
+            xx = xx.reshape(*x.shape[:-1], -1, x.shape[-1])
             xx = jnp.einsum("...hd,hdf->...hf", xx, self.kernel)
             xx = xx.reshape(*x.shape[:-1], -1)
             xx = jnp.concatenate([xx, x], axis=-1)
         yy = segment_sum(xx, batch, batch_size)
-        yy = self.act_out(yy, key=keys[1])
+        yy = self.act_out(yy, key=key)
         yy = yy * self.readout_scale + self.readout_bias
         return yy
 
