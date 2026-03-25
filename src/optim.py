@@ -1,4 +1,4 @@
-"""Optimizer construction, per-parameter LR/WD multipliers, and LR/WD schedules."""
+"""Optimizer construction, per-parameter LR/WD multipliers, and LR schedules."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def lr_multiplier_for_param_path(path: tuple[Any, ...]) -> float:
 
 
 def wd_multiplier_for_param_path(path: tuple[Any, ...]) -> float:
-    """Per-parameter weight-decay scale relative to the global WD (before scheduling).
+    """Per-parameter weight-decay scale relative to the global WD.
 
     - 1.0×: ``kernel`` (linear / grouped linear weights).
     - 0.5×: embedding tables.
@@ -121,54 +121,24 @@ def _make_lr_schedule(steps_per_epoch: int, k: int, peak_lr: float) -> Callable[
     return schedule
 
 
-def _make_wd_schedule(steps_per_epoch: int, k: int, peak_wd: float) -> Callable[[jax.Array], jax.Array]:
-    """JAX schedule ``count -> weight_decay`` matching :func:`get_scheduled_hparams` (WD branch).
-
-    For the first 1.5 periods, WD is ``peak_wd/1000``. After that, cosine cycles of length ``k``
-    epochs: ``peak_wd/1000`` -> ``peak_wd`` -> ``peak_wd/1000``.
-    """
-    k_f = float(k)
-    spe = float(steps_per_epoch)
-    warmup_end = 1.5 * k_f
-
-    def schedule(count: jax.Array) -> jax.Array:
-        epoch_frac = count.astype(jnp.float32) / spe
-        wd_low = peak_wd / 1000.0
-        phase = jnp.fmod(jnp.maximum(epoch_frac - warmup_end, 0.0), k_f) / k_f
-        return wd_low + 0.5 * (peak_wd - wd_low) * (1.0 - jnp.cos(2.0 * jnp.pi * phase))
-
-    return schedule
-
-
 def _add_scaled_decayed_weights(
-    weight_decay: float | Callable[[jax.Array], jax.Array],
+    weight_decay: float,
     wd_multiplier_tree: Any,
 ) -> optax.GradientTransformation:
     """Add ``weight_decay * wd_mult * param`` to each gradient leaf.
-
-    Supports scalar ``weight_decay`` or a schedule ``count -> wd``; when a schedule is used,
-    step count is advanced each update (unlike optax's callable-``weight_decay`` path).
 
     ``wd_multiplier_tree`` matches trainable params; multiplier ``0`` disables decay for that leaf.
     """
 
     def init_fn(params):
         del params
-        if callable(weight_decay):
-            return optax.ScaleByScheduleState(count=jnp.zeros([], jnp.int32))
         return optax.EmptyState()
 
     def update_fn(updates, state, params):
         if params is None:
             raise ValueError(optax_base.NO_PARAMS_MSG)
-        if callable(weight_decay):
-            s = weight_decay(state.count)
-            new_state: Any = optax.ScaleByScheduleState(
-                count=optax.safe_int32_increment(state.count),
-            )
-        else:
-            s = jnp.asarray(weight_decay, dtype=jnp.float32)
-            new_state = state
+        s = jnp.asarray(weight_decay, dtype=jnp.float32)
+        new_state = state
 
         def _scaled_decay(g, m, p):
             if g is None:
@@ -190,7 +160,7 @@ def _add_scaled_decayed_weights(
 
 
 def _add_lora_product_decay(
-    weight_decay: float | Callable[[jax.Array], jax.Array],
+    weight_decay: float,
     lora_product_wd_multiplier: float,
 ) -> optax.GradientTransformation:
     """Add decoupled weight decay on ``lora_down @ lora_up`` for sibling LoRA pairs.
@@ -199,28 +169,17 @@ def _add_lora_product_decay(
     ``(wd/2) * mult * ||A @ B||_F^2``, i.e. ``wd * mult * A @ B @ B.T`` on A and
     ``wd * mult * A.T @ A @ B`` on B. Pairs are found by flattening the param tree with paths
     and matching leaves whose final segment is ``lora_down`` / ``lora_up`` under the same parent.
-
-    Supports scalar ``weight_decay`` or a schedule ``count -> wd``; when a schedule is used,
-    step count is advanced each update (same pattern as :func:`_add_scaled_decayed_weights`).
     """
 
     def init_fn(params):
         del params
-        if callable(weight_decay):
-            return optax.ScaleByScheduleState(count=jnp.zeros([], jnp.int32))
         return optax.EmptyState()
 
     def update_fn(updates, state, params):
         if params is None:
             raise ValueError(optax_base.NO_PARAMS_MSG)
-        if callable(weight_decay):
-            s = weight_decay(state.count)
-            new_state: Any = optax.ScaleByScheduleState(
-                count=optax.safe_int32_increment(state.count),
-            )
-        else:
-            s = jnp.asarray(weight_decay, dtype=jnp.float32)
-            new_state = state
+        s = jnp.asarray(weight_decay, dtype=jnp.float32)
+        new_state = state
 
         mult = jnp.asarray(lora_product_wd_multiplier, dtype=jnp.float32)
         coeff = jnp.astype(s, jnp.float32) * mult
@@ -271,7 +230,7 @@ def _add_lora_product_decay(
 
 def make_optimizer(
     learning_rate: float | Callable[[jax.Array], jax.Array],
-    weight_decay: float | Callable[[jax.Array], jax.Array],
+    weight_decay: float,
     wd_multiplier_tree: Any,
     lr_multiplier_tree: Any,
     *,
@@ -284,7 +243,8 @@ def make_optimizer(
 
     Args:
         learning_rate: Global learning rate (scalar or schedule ``count -> lr``).
-        weight_decay: L2 regularisation coefficient (scalar or schedule).
+        weight_decay: Constant L2 regularisation coefficient; per-parameter masking via
+            ``wd_multiplier_tree`` (and LoRA product decay separately).
         wd_multiplier_tree: PyTree matching trainable params; per-leaf multiplier for decay.
         lr_multiplier_tree: PyTree matching trainable params; each leaf is a positive
             float factor applied before ``scale_by_learning_rate``.
@@ -311,14 +271,13 @@ def get_scheduled_hparams(
     learning_rate: float,
     weight_decay: float,
 ) -> tuple[float, float]:
-    """Return scheduled learning rate and weight decay for a fractional epoch.
+    """Return scheduled learning rate and constant weight decay for a fractional epoch.
 
     Args:
         epoch_fractional: Current fractional epoch (e.g., epoch + batch_idx / steps_per_epoch).
         k: Period length in epochs.
         learning_rate: Peak learning rate (held constant in period 1; cosine decay from period 2).
-        weight_decay: Peak weight decay; first 1.5 periods use ``weight_decay/1000``, then cosine
-            cycles of length ``k`` (low -> peak -> low).
+        weight_decay: Constant weight decay (optimizer applies per-parameter multipliers separately).
 
     Returns:
         Tuple of (learning_rate, weight_decay) for this step.
@@ -337,9 +296,4 @@ def get_scheduled_hparams(
         lr_end = lr_start / gr ** 2
         current_lr = lr_end + 0.5 * (lr_start - lr_end) * (1 + math.cos(math.pi * t))
 
-    wd_low = weight_decay / 1000.0
-    warmup_end = 1.5 * k
-    phase = (max(epoch_fractional - warmup_end, 0.0) % k) / k
-    current_wd = wd_low + 0.5 * (weight_decay - wd_low) * (1 - math.cos(2 * math.pi * phase))
-
-    return current_lr, current_wd
+    return current_lr, weight_decay

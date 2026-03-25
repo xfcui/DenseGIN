@@ -40,7 +40,6 @@ per_param_lr_multiplier_tree = TRAIN.per_param_lr_multiplier_tree
 per_param_wd_multiplier_tree = TRAIN.per_param_wd_multiplier_tree
 make_optimizer = TRAIN.make_optimizer
 _make_lr_schedule = TRAIN._make_lr_schedule
-_make_wd_schedule = TRAIN._make_wd_schedule
 _add_scaled_decayed_weights = TRAIN._add_scaled_decayed_weights
 _add_lora_product_decay = TRAIN._add_lora_product_decay
 
@@ -123,40 +122,19 @@ class TrainUtilityTest(TestCase):
         np.testing.assert_allclose(float(updates.weight), float(updates.bias), rtol=1e-5, atol=1e-5)
         np.testing.assert_allclose(float(jnp.abs(updates.weight)), 0.2, rtol=1e-3)
 
-    def test_jax_schedules_match_get_scheduled_hparams(self) -> None:
+    def test_jax_lr_schedule_matches_get_scheduled_hparams(self) -> None:
         spe = 100
         k = 4
         peak_lr = 1.0
         peak_wd = 0.2
         lr_sched = _make_lr_schedule(spe, k, peak_lr)
-        wd_sched = _make_wd_schedule(spe, k, peak_wd)
         for step in (0, 1, 50, 99, 100, 200, 401):
             epoch_frac = step / spe
             lr_py, wd_py = get_scheduled_hparams(epoch_frac, k, peak_lr, peak_wd)
             c = jnp.array(step, dtype=jnp.int32)
             lr_jax = float(lr_sched(c))
-            wd_jax = float(wd_sched(c))
             self.assertAlmostEqual(lr_jax, lr_py, places=6)
-            self.assertAlmostEqual(wd_jax, wd_py, places=6)
-
-    def test_scheduled_decayed_weights_advances_count(self) -> None:
-        params = {"w": jnp.array([2.0, 3.0], dtype=jnp.float32)}
-        grads = {"w": jnp.ones(2, dtype=jnp.float32)}
-
-        def sched(c: jax.Array) -> jax.Array:
-            return jnp.asarray(0.1, dtype=jnp.float32) * c.astype(jnp.float32)
-
-        wd_mults = {"w": 1.0}
-        tx = _add_scaled_decayed_weights(sched, wd_mults)
-        state = tx.init(params)
-        u1, s1 = tx.update(grads, state, params)
-        np.testing.assert_allclose(np.asarray(u1["w"]), np.array([1.0, 1.0], dtype=np.float32))
-        u2, s2 = tx.update(grads, s1, params)
-        np.testing.assert_allclose(
-            np.asarray(u2["w"]),
-            np.array([1.0, 1.0], dtype=np.float32) + 0.1 * np.array([2.0, 3.0], dtype=np.float32),
-        )
-        self.assertEqual(int(s2.count), 2)
+            self.assertAlmostEqual(wd_py, peak_wd, places=6)
 
     def test_scalar_decayed_weights_respects_wd_multipliers(self) -> None:
         params = {"w": jnp.array([2.0], dtype=jnp.float32)}
@@ -191,33 +169,6 @@ class TrainUtilityTest(TestCase):
         np.testing.assert_allclose(np.asarray(updates.lora_down), np.asarray(exp_down), rtol=1e-5)
         np.testing.assert_allclose(np.asarray(updates.lora_up), np.asarray(exp_up), rtol=1e-5)
 
-    def test_lora_product_decay_advances_count_with_schedule(self) -> None:
-        class _LoRA(eqx.Module):
-            lora_down: jnp.ndarray
-            lora_up: jnp.ndarray
-
-        A = jnp.eye(2, dtype=jnp.float32)
-        B = jnp.ones((2, 1), dtype=jnp.float32)
-        model = _LoRA(A, B)
-        params = eqx.filter(model, eqx.is_array)
-        grads = jtu.tree_map(jnp.ones_like, params)
-
-        def sched(c: jax.Array) -> jax.Array:
-            return jnp.asarray(0.1, dtype=jnp.float32) * c.astype(jnp.float32)
-
-        tx = _add_lora_product_decay(sched, 1.0)
-        state = tx.init(params)
-        u1, s1 = tx.update(grads, state, params)
-        np.testing.assert_allclose(np.asarray(u1.lora_down), np.ones_like(A), rtol=1e-5)
-        u2, s2 = tx.update(grads, s1, params)
-        c = 0.1
-        np.testing.assert_allclose(
-            np.asarray(u2.lora_down),
-            np.asarray(jnp.ones_like(A) + c * (A @ B @ B.T)),
-            rtol=1e-5,
-        )
-        self.assertEqual(int(s2.count), 2)
-
     def test_scheduled_lr_is_piecewise(self) -> None:
         base_lr = 1.0
         base_wd = 0.0
@@ -243,24 +194,13 @@ class TrainUtilityTest(TestCase):
             places=12,
         )
 
-    def test_scheduled_wd_is_piecewise(self) -> None:
+    def test_get_scheduled_hparams_wd_is_constant(self) -> None:
         base_lr = 0.0
         base_wd = 0.2
         k = 8
-        wd_low = base_wd / 1000.0
-        lr, wd = get_scheduled_hparams(0.0, k, base_lr, base_wd)
-        self.assertAlmostEqual(wd, wd_low)
-        lr, wd = get_scheduled_hparams(4.0, k, base_lr, base_wd)
-        self.assertAlmostEqual(wd, wd_low)
-        lr, wd = get_scheduled_hparams(8.0, k, base_lr, base_wd)
-        self.assertAlmostEqual(wd, wd_low)
-        # Warmup ends at 1.5 * k = 12; cosine cycles length k from there.
-        lr, wd = get_scheduled_hparams(12.0, k, base_lr, base_wd)
-        self.assertAlmostEqual(wd, wd_low)
-        lr, wd = get_scheduled_hparams(16.0, k, base_lr, base_wd)
-        self.assertAlmostEqual(wd, base_wd)
-        lr, wd = get_scheduled_hparams(20.0, k, base_lr, base_wd)
-        self.assertAlmostEqual(wd, wd_low)
+        for epoch_frac in (0.0, 4.0, 12.0, 16.0, 20.0):
+            _lr, wd = get_scheduled_hparams(epoch_frac, k, base_lr, base_wd)
+            self.assertAlmostEqual(wd, base_wd)
 
     def test_resolve_dataset_root_handles_processed_layout(self) -> None:
         with TemporaryDirectory() as temp_dir:

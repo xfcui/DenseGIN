@@ -27,7 +27,6 @@ from optim import (
     _add_lora_product_decay,
     _add_scaled_decayed_weights,
     _make_lr_schedule,
-    _make_wd_schedule,
     get_scheduled_hparams,
     lr_multiplier_for_param_path,
     make_optimizer,
@@ -199,9 +198,8 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
     steps_per_epoch = len(train_loader)
     if scheduler_period is not None:
         lr_sched = _make_lr_schedule(steps_per_epoch, scheduler_period, learning_rate)
-        wd_sched = _make_wd_schedule(steps_per_epoch, scheduler_period, weight_decay)
     else:
-        lr_sched, wd_sched = learning_rate, weight_decay
+        lr_sched = learning_rate
 
     # Initialize model
     key = jax.random.PRNGKey(int(seed))
@@ -215,7 +213,7 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
     print(f"Using Adan optimizer with lr={learning_rate} and wd={weight_decay}")
     optimizer = make_optimizer(
         learning_rate=lr_sched,
-        weight_decay=wd_sched,
+        weight_decay=weight_decay,
         wd_multiplier_tree=wd_mult_tree,
         lr_multiplier_tree=lr_mult_tree,
     )
