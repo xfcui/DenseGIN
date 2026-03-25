@@ -291,7 +291,7 @@ class ModelCompatibilityTest(unittest.TestCase):
             idx = np.array([[0, 1, 0, 1], [2, 0, 0, 0]], dtype=np.int32)
             batch[f"edge{suffix}_index"] = idx
 
-            model = _dense_gin(depth=1, width=16, num_head=2, key=jax.random.PRNGKey(2025))
+        model = _dense_gin(depth=1, width=16, num_head=2, key=jax.random.PRNGKey(2025))
         out = model(batch, training=False, key=None)
         self.assertEqual(out.shape, (1, 1))
 

@@ -447,9 +447,8 @@ class DuAxMPNN(eqx.Module):
     depth_mix:  tuple
     head: HeadKernel
 
-    def __init__(self, depth, width, num_head, dim_head, key=None):
-        if key is None:
-            key = jax.random.PRNGKey(0)
+    def __init__(self, depth, width, num_head, dim_head, key):
+        assert key is not None
         keys = _split_or_none(key, depth * 2 + 3)
 
         self.depth = depth
@@ -529,4 +528,6 @@ class DuAxMPNN(eqx.Module):
 
 def get_model(key):
     """Create the default DuAxMPNN model (depth=5, width=256, heads=16)."""
+    if key is None:
+        key = jax.random.PRNGKey(0)
     return DuAxMPNN(depth=5, width=256, num_head=16, dim_head=16, key=key)
