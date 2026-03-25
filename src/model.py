@@ -416,14 +416,11 @@ class HeadKernel(eqx.Module):
 
     def __call__(self, x, x_lst, batch, batch_size, key=None):
         """Sum-pool nodes, fuse virtual node, project to scalar, and apply output affine."""
-        if self.kernel.shape[0] == 0:
-            xx = x
-        else:
-            xx = jnp.concatenate(x_lst, axis=-1)
-            xx = xx.reshape(*x.shape[:-1], -1, x.shape[-1])
-            xx = jnp.einsum("...hd,hdf->...hf", xx, self.kernel)
-            xx = xx.reshape(*x.shape[:-1], -1)
-            xx = jnp.concatenate([xx, x], axis=-1)
+        xx = jnp.concatenate(x_lst, axis=-1)
+        xx = xx.reshape(*x.shape[:-1], -1, x.shape[-1])
+        xx = jnp.einsum("...hd,hdf->...hf", xx, self.kernel)
+        xx = xx.reshape(*x.shape[:-1], -1)
+        xx = jnp.concatenate([xx, x], axis=-1)
         yy = segment_sum(xx, batch, batch_size)
         yy = self.act_out(yy, key=key)
         yy = yy * self.readout_scale + self.readout_bias
@@ -449,6 +446,7 @@ class DuAxMPNN(eqx.Module):
 
     def __init__(self, depth, width, num_head, dim_head, key):
         assert key is not None
+        assert depth >= 2
         keys = _split_or_none(key, depth * 2 + 3)
 
         self.depth = depth
@@ -528,6 +526,5 @@ class DuAxMPNN(eqx.Module):
 
 def get_model(key):
     """Create the default DuAxMPNN model (depth=5, width=256, heads=16)."""
-    if key is None:
-        key = jax.random.PRNGKey(0)
+    assert key is not None
     return DuAxMPNN(depth=5, width=256, num_head=16, dim_head=16, key=key)

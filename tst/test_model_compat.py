@@ -177,7 +177,7 @@ class ModelCompatibilityTest(unittest.TestCase):
 
     def test_get_edge_matches_dataset_keying_and_masks(self) -> None:
         batch = _make_minimal_batch()
-        model = _dense_gin(depth=1, width=16, num_head=4, key=jax.random.PRNGKey(0))
+        model = _dense_gin(depth=2, width=16, num_head=4, key=jax.random.PRNGKey(0))
         edges = model._get_edge(batch)
 
         self.assertEqual(len(edges), len(EDGE_SUFFIXES))
@@ -193,7 +193,7 @@ class ModelCompatibilityTest(unittest.TestCase):
             _make_toy_dataset(dataset_root)
             dataset = PCQMDataset(dataset_root=dataset_root, split="train", split_file=dataset_root / "split_dict.h5")
             batch = dataset.batch_collapse([0, 1], pad_to_multiple=4)
-            model = _dense_gin(depth=1, width=32, num_head=2, key=jax.random.PRNGKey(0))
+            model = _dense_gin(depth=2, width=32, num_head=2, key=jax.random.PRNGKey(0))
 
             out = model(batch, training=False, key=None)
             self.assertEqual(out.shape, (2, 1))
@@ -224,7 +224,7 @@ class ModelCompatibilityTest(unittest.TestCase):
                 self.assertTrue(np.array_equal(batch[f"edge{suffix}_batch"][0], 0))
 
             # The null graph has index 0 and must be removed from model output.
-            model = _dense_gin(depth=1, width=32, num_head=2, key=jax.random.PRNGKey(1))
+            model = _dense_gin(depth=2, width=32, num_head=2, key=jax.random.PRNGKey(1))
             out = model(batch, training=False, key=None)
             self.assertEqual(out.shape[0], int(batch["batch_n_graphs"]))
 
@@ -247,7 +247,7 @@ class ModelCompatibilityTest(unittest.TestCase):
     def test_model_forward_accepts_node_mask_derived_graph_id(self) -> None:
         # This intentionally exercises the updated node_mask path (node_batch > 0).
         batch = _make_minimal_batch()
-        model = _dense_gin(depth=1, width=16, num_head=2, key=jax.random.PRNGKey(42))
+        model = _dense_gin(depth=2, width=16, num_head=2, key=jax.random.PRNGKey(42))
         batch["node_batch"] = np.array([0, 1, 1, 1], dtype=np.int32)
         batch["batch_n_graphs"] = np.int32(2)
         batch["node_feat"] = np.pad(
@@ -291,7 +291,7 @@ class ModelCompatibilityTest(unittest.TestCase):
             idx = np.array([[0, 1, 0, 1], [2, 0, 0, 0]], dtype=np.int32)
             batch[f"edge{suffix}_index"] = idx
 
-        model = _dense_gin(depth=1, width=16, num_head=2, key=jax.random.PRNGKey(2025))
+        model = _dense_gin(depth=2, width=16, num_head=2, key=jax.random.PRNGKey(2025))
         out = model(batch, training=False, key=None)
         self.assertEqual(out.shape, (1, 1))
 
@@ -307,7 +307,7 @@ class ModelCompatibilityTest(unittest.TestCase):
             batch = dataset.batch_collapse([], pad_to_multiple=4)
 
             self.assertEqual(int(batch["batch_n_graphs"]), 0)
-            model = _dense_gin(depth=1, width=16, num_head=2, key=jax.random.PRNGKey(11))
+            model = _dense_gin(depth=2, width=16, num_head=2, key=jax.random.PRNGKey(11))
             out = model(batch, training=False, key=None)
             self.assertEqual(out.shape, (0, 1))
 
@@ -323,7 +323,7 @@ class ModelCompatibilityTest(unittest.TestCase):
                 dtype=np.int32,
             )
 
-        edges = _dense_gin(depth=1, width=8, num_head=2, key=jax.random.PRNGKey(3))._get_edge(batch)
+        edges = _dense_gin(depth=2, width=8, num_head=2, key=jax.random.PRNGKey(3))._get_edge(batch)
         for suffix, (_edge_index, _edge_attr, deg) in zip(EDGE_SUFFIXES, edges):
             edge_mask = batch[f"edge{suffix}_batch"] > 0
             self.assertTrue(np.array_equal(edge_mask, np.array([False, False, True, True])))
@@ -356,7 +356,7 @@ class ModelCompatibilityTest(unittest.TestCase):
             for suffix in EDGE_SUFFIXES:
                 batch[f"edge{suffix}_batch"] = np.zeros_like(batch[f"edge{suffix}_batch"])
 
-            model = _dense_gin(depth=1, width=16, num_head=2, key=jax.random.PRNGKey(2026))
+            model = _dense_gin(depth=2, width=16, num_head=2, key=jax.random.PRNGKey(2026))
             out = model(batch, training=False, key=None)
             self.assertEqual(out.shape, (2, 1))
             self.assertTrue(np.all(np.isfinite(np.asarray(out))))
@@ -375,13 +375,27 @@ class ModelCompatibilityTest(unittest.TestCase):
             self.assertIn("batch_n_graphs", batch)
             self.assertNotIn("batch_size", batch)
 
-            model = _dense_gin(depth=1, width=16, num_head=4, key=jax.random.PRNGKey(2027))
+            model = _dense_gin(depth=2, width=16, num_head=4, key=jax.random.PRNGKey(2027))
             out = model(batch, training=False, key=None)
             self.assertEqual(out.shape[0], int(batch["batch_n_graphs"]))
             self.assertTrue(np.all(np.isfinite(np.asarray(out))))
 
+    def test_du_ax_mpnn_rejects_depth_below_2(self) -> None:
+        with self.assertRaises(AssertionError):
+            DuAxMPNN(
+                depth=1,
+                width=8,
+                num_head=2,
+                dim_head=4,
+                key=jax.random.PRNGKey(0),
+            )
+
+    def test_get_model_rejects_none_key(self) -> None:
+        with self.assertRaises(AssertionError):
+            get_model(None)  # type: ignore[arg-type]
+
     def test_get_model_matches_expected_default_config(self) -> None:
-        model = get_model(None)
+        model = get_model(jax.random.PRNGKey(0))
         self.assertIsInstance(model, DuAxMPNN)
         self.assertEqual(model.depth, 5)
         self.assertEqual(model.width, 256)
@@ -396,9 +410,10 @@ class ModelCompatibilityTest(unittest.TestCase):
         self.assertEqual(model.head.num_head, model.num_head)
         self.assertEqual(model.head.dim_head, model.dim_head)
 
-    def test_get_model_uses_stable_seed_when_none(self) -> None:
-        model_a = get_model(None)
-        model_b = get_model(None)
+    def test_get_model_same_key_yields_identical_params(self) -> None:
+        key = jax.random.PRNGKey(0)
+        model_a = get_model(key)
+        model_b = get_model(key)
         params_a = jax.tree_util.tree_leaves(eqx.filter(model_a, eqx.is_array))
         params_b = jax.tree_util.tree_leaves(eqx.filter(model_b, eqx.is_array))
         self.assertEqual(len(params_a), len(params_b))
@@ -408,7 +423,7 @@ class ModelCompatibilityTest(unittest.TestCase):
 
     def test_get_model_output_is_finite_and_matches_explicit_ctor(self) -> None:
         batch = _make_minimal_batch()
-        model_default = get_model(None)
+        model_default = get_model(jax.random.PRNGKey(0))
         model_explicit = DuAxMPNN(
             depth=5,
             width=256,
