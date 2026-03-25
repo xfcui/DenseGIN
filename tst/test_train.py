@@ -373,6 +373,35 @@ class TrainLoopTest(TestCase):
             ],
         )
 
+    def test_train_raises_when_dataloader_is_empty(self) -> None:
+        class EmptyLoader:
+            def __iter__(self):
+                return iter([])
+
+            def __len__(self):
+                return 0
+
+        def empty_dl(*_args, **_kwargs):
+            return EmptyLoader()
+
+        with TemporaryDirectory() as temp_dir:
+            with (
+                patch.object(TRAIN, "get_jax_dataloader", empty_dl),
+                patch.object(TRAIN, "get_model", lambda _key, config=None: _AffineModel()),
+            ):
+                with self.assertRaises(RuntimeError) as ctx:
+                    TRAIN.train(
+                        num_epochs=1,
+                        batch_size=4,
+                        learning_rate=1e-3,
+                        weight_decay=0.0,
+                        model_save_path=str(Path(temp_dir) / "best.eqx"),
+                        scheduler_period=None,
+                    )
+        msg = str(ctx.exception)
+        self.assertIn("dataloader is empty", msg)
+        self.assertIn("Expected file:", msg)
+
     def test_train_loop_uses_patched_step_and_saves_best(self) -> None:
         class FakeLoader:
             def __init__(self, batches: list[dict[str, np.ndarray]], expected_batch_size: int):

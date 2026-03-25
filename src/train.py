@@ -214,6 +214,14 @@ def train(
         processed_h5=processed_h5,
     )
 
+    if len(train_loader) == 0 or len(valid_loader) == 0:
+        proc_path = _resolve_dataset_root(hdf5_path) / "processed" / Path(processed_h5).name
+        raise RuntimeError(
+            "Train or validation dataloader is empty (no graphs with label >= 0 in that split). "
+            "This usually means the processed HDF5 has missing targets (e.g. all labels are -1). "
+            f"Expected file: {proc_path}"
+        )
+
     steps_per_epoch = len(train_loader)
     if scheduler_period is not None:
         lr_sched = _make_lr_schedule(steps_per_epoch, scheduler_period, learning_rate)
@@ -293,7 +301,7 @@ if __name__ == "__main__":
 
     train(
         num_epochs=args.scheduler_period*8,
-        batch_size=args.batch_size-1,
+        batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         model_save_path=args.model_save_path,

@@ -100,6 +100,8 @@ def _load_graphs_from_smiles(
     smiles_col: str,
     label_col: str,
     sdf_path: Path | None,
+    *,
+    h_mode: str,
 ) -> tuple[list[dict], np.ndarray]:
     data = pd.read_csv(csv_path)
     if smiles_col not in data.columns:
@@ -142,7 +144,7 @@ def _load_graphs_from_smiles(
 
         try:
             sdf_mol = supplier[i] if (supplier is not None and i < sdf_len) else None
-            graph = mol_to_graph(str(smiles), sdf_mol=sdf_mol, h_mode=args.h_mode)
+            graph = mol_to_graph(str(smiles), sdf_mol=sdf_mol, h_mode=h_mode)
             if graph is None:
                 failed += 1
                 graph = _build_empty_graph()
@@ -193,7 +195,9 @@ def main() -> None:
         return
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    graphs, labels = _load_graphs_from_smiles(raw_csv, args.smiles_col, args.label_col, sdf_path)
+    graphs, labels = _load_graphs_from_smiles(
+        raw_csv, args.smiles_col, args.label_col, sdf_path, h_mode=args.h_mode
+    )
     save_graphs(out_path, graphs, labels)
     print(f"Saved processed dataset -> {out_path}")
     _print_dataset_info(out_path)
