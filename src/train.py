@@ -21,7 +21,13 @@ import jax.numpy as jnp
 import equinox as eqx
 from tqdm import tqdm
 from dataset import PCQMDataset, PCQMDataloader
-from model import get_model
+from model import AblationConfig, get_model
+
+_H5_FOR_H_MODE = {
+    "active": "data_processed.h5",
+    "heavy": "data_processed_heavy.h5",
+    "all": "data_processed_all.h5",
+}
 
 from optim import (
     _add_lora_product_decay,
@@ -55,10 +61,11 @@ def get_jax_dataloader(
     shuffle: bool,
     drop_last: bool = False,
     seed: int | None = None,
+    processed_h5: str = "data_processed.h5",
 ):
     """Instantiate a ``PCQMDataloader`` for the given split and batch size."""
     dataset_root = _resolve_dataset_root(hdf5_path)
-    dataset = PCQMDataset(dataset_root=dataset_root, split=split)
+    dataset = PCQMDataset(dataset_root=dataset_root, split=split, processed_h5=processed_h5)
     return PCQMDataloader(
         dataset,
         batch_size=batch_size,
@@ -159,10 +166,18 @@ def _validate_one_epoch(model, valid_loader, epoch: int) -> float:
     return total_valid_loss / max(num_valid_batches, 1)
 
 
-def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
-          model_save_path="results/best_model.eqx",
-          scheduler_period=None,
-          seed: int = 0):
+def train(
+    num_epochs=1,
+    batch_size=32,
+    learning_rate=1e-2,
+    weight_decay=1e-2,
+    model_save_path="results/best_model.eqx",
+    scheduler_period=None,
+    seed: int = 0,
+    *,
+    ablation: AblationConfig | None = None,
+    processed_h5: str = "data_processed.h5",
+):
     """
     Train the GNN model on PCQM4Mv2 dataset.
 
@@ -174,6 +189,8 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
         model_save_path: Path to save the best model. Default: "results/best_model.eqx".
         scheduler_period: Period k for geometric LR scheduler. If None, use constant LR.
         seed: RNG seed for model init, training minibatch order (via dataloader), and dropout.
+        ablation: Static model ablation config (default full DuAxMPNN).
+        processed_h5: Basename of the processed HDF5 under ``<root>/processed/``.
 
     Returns:
         Trained model
@@ -186,6 +203,7 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
         shuffle=True,
         drop_last=True,
         seed=seed,
+        processed_h5=processed_h5,
     )
     valid_loader = get_jax_dataloader(
         hdf5_path=hdf5_path,
@@ -193,6 +211,7 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
         batch_size=batch_size * 2,
         shuffle=False,
         drop_last=False,
+        processed_h5=processed_h5,
     )
 
     steps_per_epoch = len(train_loader)
@@ -204,7 +223,7 @@ def train(num_epochs=1, batch_size=32, learning_rate=1e-2, weight_decay=1e-2,
     # Initialize model
     key = jax.random.PRNGKey(int(seed))
     model_key, train_key = jax.random.split(key)
-    model = get_model(model_key)
+    model = get_model(model_key, config=ablation)
 
     params = eqx.filter(model, eqx.is_array)
     lr_mult_tree = per_param_lr_multiplier_tree(params)
@@ -252,14 +271,34 @@ if __name__ == "__main__":
     parser.add_argument('--scheduler_period', type=int, default=8, help='Period for geometric LR scheduler')
     parser.add_argument('--model_save_path', type=str, default="results/best_model.eqx", help='Path to save the best model')
     parser.add_argument('--seed', type=int, default=0, help='Random seed for init, training shuffle, and dropout')
+    parser.add_argument('--max_hops', type=int, default=4)
+    parser.add_argument('--depth_mode', type=str, default='dense', choices=('dense', 'resnet', 'none'))
+    parser.add_argument('--cont_embed', type=str, default='moact', choices=('moact', 'linear', 'mlp', 'binning'))
+    parser.add_argument('--moact_bases', type=int, default=8)
+    parser.add_argument('--no_neighbor_rank', action='store_true')
+    parser.add_argument('--elec_mode', type=str, default='absolute', choices=('absolute', 'per_bond'))
+    parser.add_argument('--h-mode', type=str, default='active', choices=tuple(_H5_FOR_H_MODE.keys()))
+    parser.add_argument('--processed-h5', type=str, default=None, help='Override processed HDF5 basename')
     args = parser.parse_args()
 
+    ablation = AblationConfig(
+        max_hops=args.max_hops,
+        depth_mode=args.depth_mode,
+        cont_embed=args.cont_embed,
+        moact_bases=args.moact_bases,
+        use_neighbor_rank=not args.no_neighbor_rank,
+        elec_mode=args.elec_mode,
+    )
+    processed_h5 = args.processed_h5 or _H5_FOR_H_MODE[args.h_mode]
+
     train(
-        num_epochs=args.scheduler_period*10,
+        num_epochs=args.scheduler_period*8,
         batch_size=args.batch_size-1,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         model_save_path=args.model_save_path,
         scheduler_period=args.scheduler_period,
         seed=args.seed,
+        ablation=ablation,
+        processed_h5=processed_h5,
     )

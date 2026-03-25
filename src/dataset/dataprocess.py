@@ -70,6 +70,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Overwrite output even if it already exists.",
     )
+    parser.add_argument(
+        "--h-mode",
+        choices=("active", "all", "heavy"),
+        default="active",
+        help="Hydrogen handling for graph nodes: active (default), all H, or heavy-only.",
+    )
     return parser.parse_args()
 
 
@@ -136,7 +142,7 @@ def _load_graphs_from_smiles(
 
         try:
             sdf_mol = supplier[i] if (supplier is not None and i < sdf_len) else None
-            graph = mol_to_graph(str(smiles), sdf_mol=sdf_mol)
+            graph = mol_to_graph(str(smiles), sdf_mol=sdf_mol, h_mode=args.h_mode)
             if graph is None:
                 failed += 1
                 graph = _build_empty_graph()
@@ -172,7 +178,11 @@ def main() -> None:
     dataset_root = Path(args.dataset_root)
     raw_csv = Path(args.raw_csv) if args.raw_csv else dataset_root / args.dataset_name / "raw" / "data.csv.gz"
     sdf_path = Path(args.sdf) if args.sdf else dataset_root / args.dataset_name / "raw" / "pcqm4m-v2-train.sdf"
-    out_path = Path(args.out) if args.out else dataset_root / args.dataset_name / "processed" / "data_processed.h5"
+    if args.out:
+        out_path = Path(args.out)
+    else:
+        sub = "data_processed.h5" if args.h_mode == "active" else f"data_processed_{args.h_mode}.h5"
+        out_path = dataset_root / args.dataset_name / "processed" / sub
 
     if not raw_csv.exists():
         raise FileNotFoundError(f"Input CSV not found: {raw_csv}")

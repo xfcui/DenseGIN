@@ -103,9 +103,10 @@ class PCQMDataset:
         split: str | None = "train",
         split_file: Path | str | None = None,
         load_in_memory: bool = True,
+        processed_h5: str | Path = "data_processed.h5",
     ) -> None:
         self.dataset_root = Path(dataset_root or _default_dataset_root())
-        self.data_file = self.dataset_root / "processed" / "data_processed.h5"
+        self.data_file = self.dataset_root / "processed" / Path(processed_h5).name
         if not self.data_file.exists():
             raise FileNotFoundError(f"Processed HDF5 not found: {self.data_file}")
 

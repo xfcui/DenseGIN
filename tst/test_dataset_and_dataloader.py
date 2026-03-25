@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Dict
@@ -151,6 +152,22 @@ class PCQMDatasetTestCase(unittest.TestCase):
             bad_root = Path(bad_dir)
             with self.assertRaises(FileNotFoundError):
                 PCQMDataset(dataset_root=bad_root / "missing", split=None, split_file=bad_root / "split_dict.h5")
+
+    def test_processed_h5_alternate_basename(self) -> None:
+        proc = self.dataset_root / "processed"
+        alt = proc / "data_processed_copy.h5"
+        shutil.copyfile(proc / "data_processed.h5", alt)
+        ds2 = PCQMDataset(
+            dataset_root=self.dataset_root,
+            split=None,
+            split_file=self.dataset_root / "split_dict.h5",
+            processed_h5="data_processed_copy.h5",
+        )
+        try:
+            self.assertEqual(ds2.get_graph_count(), self.dataset.get_graph_count())
+        finally:
+            ds2.close()
+            alt.unlink(missing_ok=True)
 
     def test_batch_collapse_dynamic_null_and_offsets(self) -> None:
         batch = self.dataset.batch_collapse([0, 2], pad_to_multiple=4)

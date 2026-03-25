@@ -353,7 +353,7 @@ class TrainLoopTest(TestCase):
         with TemporaryDirectory() as temp_dir:
             with (
                 patch.object(TRAIN, "get_jax_dataloader", capture_loaders),
-                patch.object(TRAIN, "get_model", lambda _key: _AffineModel()),
+                patch.object(TRAIN, "get_model", lambda _key, config=None: _AffineModel()),
                 patch.object(TRAIN.eqx, "tree_serialise_leaves", lambda path, model: None),
             ):
                 TRAIN.train(
@@ -417,7 +417,7 @@ class TrainLoopTest(TestCase):
                 return valid_loader
             raise AssertionError(f"Unexpected split={split}")
 
-        def fake_get_model(key):
+        def fake_get_model(key, config=None):
             return TrainModel()
 
         def fake_train_step(model, opt_state, batch, optimizer, key):

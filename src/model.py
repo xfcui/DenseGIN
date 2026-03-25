@@ -7,7 +7,7 @@ import equinox as eqx
 from jax.ops import segment_sum
 
 # dataset.py feature dimensions
-# 10 atom features, 6/2/3/4 hop bond features, 17 node continuous features
+# 10 atom features, 6/2/3/4 hop bond features; node_embd has 17 floats in HDF5, model uses 14 (RWPE12 + EN/GC)
 from dataset import (
     NODE_FEAT_VOCAB_SIZES,
     NODE_FEAT_TOTAL_VOCAB,
@@ -27,6 +27,56 @@ EDGE_DIMS_PER_HOP = [
     (EDGE_FEAT_TOTAL_VOCAB[suffix], len(EDGE_FEAT_VOCAB_SIZES[suffix]))
     for suffix in EDGE_SUFFIXES
 ]
+
+# 1-hop edge storage: graph.py appends neighbor rank after bond_features (..., ring, rank) → rank at column 5.
+_ONE_HOP_FEAT_SIZES = list(EDGE_FEAT_VOCAB_SIZES[""])
+_ONE_HOP_OFFSETS = np.asarray(
+    [1] + list(np.cumsum(_ONE_HOP_FEAT_SIZES[:-1], dtype=np.int32)),
+    dtype=np.int32,
+)
+NEIGHBOR_RANK_EDGE_COL = 5
+# Constant token for column 5 removes rank variation (ablation); use first bucket of that column's vocab.
+NEUTRAL_ONEHOP_RANK_COL_TOKEN = int(_ONE_HOP_OFFSETS[NEIGHBOR_RANK_EDGE_COL])
+
+
+class AblationConfig(eqx.Module):
+    """Static experiment configuration (not trained)."""
+
+    max_hops: int = eqx.field(static=True)
+    depth_mode: str = eqx.field(static=True)
+    cont_embed: str = eqx.field(static=True)
+    moact_bases: int = eqx.field(static=True)
+    use_neighbor_rank: bool = eqx.field(static=True)
+    elec_mode: str = eqx.field(static=True)
+
+    def __init__(
+        self,
+        *,
+        max_hops: int = 4,
+        depth_mode: str = "dense",
+        cont_embed: str = "moact",
+        moact_bases: int = 8,
+        use_neighbor_rank: bool = True,
+        elec_mode: str = "absolute",
+    ):
+        self.max_hops = int(max_hops)
+        self.depth_mode = str(depth_mode)
+        self.cont_embed = str(cont_embed)
+        self.moact_bases = int(moact_bases)
+        self.use_neighbor_rank = bool(use_neighbor_rank)
+        self.elec_mode = str(elec_mode)
+
+    def validate(self) -> None:
+        if not (1 <= self.max_hops <= len(EDGE_SUFFIXES)):
+            raise ValueError(f"max_hops must be in [1, {len(EDGE_SUFFIXES)}], got {self.max_hops}")
+        if self.depth_mode not in ("dense", "resnet", "none"):
+            raise ValueError(f"depth_mode must be dense|resnet|none, got {self.depth_mode!r}")
+        if self.cont_embed not in ("moact", "linear", "mlp", "binning"):
+            raise ValueError(f"cont_embed must be moact|linear|mlp|binning, got {self.cont_embed!r}")
+        if self.moact_bases < 2:
+            raise ValueError(f"moact_bases must be >= 2, got {self.moact_bases}")
+        if self.elec_mode not in ("absolute", "per_bond"):
+            raise ValueError(f"elec_mode must be absolute|per_bond, got {self.elec_mode!r}")
 
 
 def _split_or_none(key, num):
@@ -219,23 +269,79 @@ class MoAct(eqx.Module):
         return (fn(x[..., None] * s) * w).sum(-1)
 
 class DiffEmbedLayer(eqx.Module):
-    """Per-edge electronegativity difference: MoAct (2 channels) → linear to ``dim_head``."""
+    """Per-edge electronic embedding: MoAct / linear / MLP / binning → ``dim_head``."""
 
-    moa: MoAct
-    linear: LinearLayer
+    cont_embed: str = eqx.field(static=True)
+    num_channels: int = eqx.field(static=True)
+    moact_bases: int = eqx.field(static=True)
+    linear: LinearLayer | None
+    moa: MoAct | None
+    act: ActLayer | None
+    bin_embed: EmbedLayer | None
 
-    def __init__(self, num_channels, dim_head, key, *, init_std=1.0):
-        self.moa = MoAct(num_channels, dim_head, act="tanh")
-        self.linear = LinearLayer(num_channels, dim_head, key, init_std=init_std)
+    def __init__(
+        self,
+        num_channels,
+        dim_head,
+        key,
+        *,
+        cont_embed: str = "moact",
+        moact_bases: int = 8,
+        init_std: float = 1.0,
+    ):
+        self.cont_embed = cont_embed
+        self.num_channels = int(num_channels)
+        self.moact_bases = int(moact_bases)
+        keys = _split_or_none(key, 3)
+
+        if cont_embed == "moact":
+            self.moa = MoAct(num_channels, moact_bases, act="tanh")
+            self.linear = LinearLayer(num_channels, dim_head, keys[0], init_std=init_std)
+            self.act = None
+            self.bin_embed = None
+        elif cont_embed == "linear":
+            self.moa = None
+            self.linear = LinearLayer(num_channels, dim_head, keys[0], init_std=init_std)
+            self.act = None
+            self.bin_embed = None
+        elif cont_embed == "mlp":
+            self.moa = None
+            self.linear = LinearLayer(num_channels, dim_head, keys[0], init_std=init_std)
+            self.act = ActLayer(dim_head)
+            self.bin_embed = None
+        elif cont_embed == "binning":
+            self.moa = None
+            total_vocab = moact_bases * num_channels + 1
+            self.bin_embed = EmbedLayer(total_vocab, num_channels, dim_head, keys[0], init_std=init_std)
+            self.linear = None
+            self.act = None
+        else:
+            raise ValueError(f"Unknown cont_embed {cont_embed!r}")
 
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        return self.linear(self.moa(x))
+        if self.cont_embed == "moact":
+            assert self.moa is not None and self.linear is not None
+            return self.linear(self.moa(x))
+        if self.cont_embed == "linear":
+            assert self.linear is not None
+            return self.linear(x)
+        if self.cont_embed == "mlp":
+            assert self.linear is not None and self.act is not None
+            return self.act(self.linear(x))
+        assert self.bin_embed is not None
+        x = jnp.clip(x.astype(jnp.float32), -1.0, 1.0)
+        bins = ((x + 1.0) * 0.5 * float(self.moact_bases)).astype(jnp.int32)
+        bins = jnp.clip(bins, 0, self.moact_bases - 1)
+        c = jnp.arange(self.num_channels, dtype=jnp.int32)
+        tokens = 1 + c * self.moact_bases + bins
+        return self.bin_embed(tokens)
 
 
 # VoVNet: https://arxiv.org/abs/1904.09730
 # GNN-AK: https://openreview.net/forum?id=Mspk_WYKoEH
 class ConvKernel(eqx.Module):
     """Bond-aware graph convolution with degree normalisation."""
+    elec_mode: str = eqx.field(static=True)
     lora_down:  jnp.ndarray
     lora_up:    jnp.ndarray
     embed_edge: EmbedLayer
@@ -244,14 +350,24 @@ class ConvKernel(eqx.Module):
     lin_pre:    LinearLayer
     act_out:    GatedLinearBlock
 
-    def __init__(self, num_head, dim_head, edge_total_vocab, edge_num_features, key=None):
+    def __init__(self, num_head, dim_head, edge_total_vocab, edge_num_features, key=None, *, ablation: AblationConfig | None = None):
+        ablation = ablation if ablation is not None else AblationConfig()
         width_norm = num_head * dim_head
         keys = _split_or_none(key, 6)
+        elec_ch = 4 if ablation.elec_mode == "absolute" else 2
+        self.elec_mode = ablation.elec_mode
 
         self.lora_down  = jax.random.normal(keys[4], (width_norm, dim_head)) / np.sqrt(width_norm)
         self.lora_up    = jnp.zeros((dim_head, width_norm), dtype=jnp.float32)
         self.embed_edge = EmbedLayer(edge_total_vocab, edge_num_features, dim_head, keys[0], init_std=0.01)
-        self.embed_elec = DiffEmbedLayer(EMBED_ELEC * 2, dim_head, keys[5], init_std=0.01)
+        self.embed_elec = DiffEmbedLayer(
+            elec_ch,
+            dim_head,
+            keys[5],
+            cont_embed=ablation.cont_embed,
+            moact_bases=ablation.moact_bases,
+            init_std=0.01,
+        )
         self.embed_deg  = EmbedLayer(6, 1, width_norm, keys[1], init_std=0.1)
         self.lin_pre    = LinearLayer(width_norm, width_norm, keys[2])
         self.act_out    = GatedLinearBlock(width_norm, width_norm, num_head, dim_head, keep_groups=True, key=keys[3])
@@ -260,9 +376,11 @@ class ConvKernel(eqx.Module):
 
     def __call__(self, x, deg, edge_idx, edge_attr, node_elec, key=None):
         """Aggregate neighbor messages weighted by edge and degree embeddings."""
-        emb = [node_elec[edge_idx[0]] - node_elec[edge_idx[1]],
-               node_elec[edge_idx[0]] + node_elec[edge_idx[1]]]
-        emb = jnp.concatenate(emb, axis=-1)  # (N_edges, 4)
+        src, dst = node_elec[edge_idx[0]], node_elec[edge_idx[1]]
+        if self.elec_mode == "absolute":
+            emb = jnp.concatenate([src - dst, src + dst], axis=-1)
+        else:
+            emb = src - dst
         emb = self.embed_edge(edge_attr) + self.embed_elec(emb)
         msg = x[edge_idx[0]] + x[edge_idx[1]]
         msg = self.lin_pre(msg) + (msg @ self.lora_down * emb) @ self.lora_up
@@ -286,7 +404,7 @@ class VirtKernel(eqx.Module):
         print("##params[virt]:", _count_params(self))
 
     def __call__(self, x, batch, batch_size, key=None):
-        """Pool node features to graph-level, accumulate virtual state, and broadcast update."""
+        """Pool node features to graph-level, transform, and broadcast update to each node."""
         msg = segment_sum(x, batch, batch_size)
         msg = self.act_out(msg, key=key)[batch]
         return msg
@@ -320,7 +438,8 @@ class LayerMixerKernel(eqx.Module):
     sca_out:  ScaleLayer
     conv: tuple
 
-    def __init__(self, width, num_head, dim_head, edge_dims_per_hop, key=None):
+    def __init__(self, width, num_head, dim_head, edge_dims_per_hop, key=None, *, ablation: AblationConfig | None = None):
+        ablation = ablation if ablation is not None else AblationConfig()
         num_hops = len(edge_dims_per_hop)
         width_norm = num_head * dim_head
         keys = _split_or_none(key, num_hops + 3)
@@ -334,7 +453,8 @@ class LayerMixerKernel(eqx.Module):
                 dim_head,
                 edge_dims_per_hop[i][0],
                 edge_dims_per_hop[i][1],
-                key=keys[i+3],
+                key=keys[i + 3],
+                ablation=ablation,
             )
             for i in range(num_hops)
         )
@@ -407,7 +527,10 @@ class HeadKernel(eqx.Module):
 
         self.num_head = num_head
         self.dim_head = dim_head
-        self.kernel   = jax.random.normal(keys[0], (depth, width, width_neck)) / np.sqrt(width)
+        if depth > 0:
+            self.kernel = jax.random.normal(keys[0], (depth, width, width_neck)) / np.sqrt(width)
+        else:
+            self.kernel = jnp.zeros((0, width, width_neck), dtype=jnp.float32)
         self.act_out  = GatedLinearBlock(width_cat, 1, num_head*2, dim_head*2, key=keys[2])
         self.readout_scale = jnp.asarray(1.162127, dtype=jnp.float32)
         self.readout_bias  = jnp.asarray(5.689452, dtype=jnp.float32)
@@ -416,11 +539,14 @@ class HeadKernel(eqx.Module):
 
     def __call__(self, x, x_lst, batch, batch_size, key=None):
         """Sum-pool nodes, fuse virtual node, project to scalar, and apply output affine."""
-        xx = jnp.concatenate(x_lst, axis=-1)
-        xx = xx.reshape(*x.shape[:-1], -1, x.shape[-1])
-        xx = jnp.einsum("...hd,hdf->...hf", xx, self.kernel)
-        xx = xx.reshape(*x.shape[:-1], -1)
-        xx = jnp.concatenate([xx, x], axis=-1)
+        if self.kernel.shape[0] == 0:
+            xx = x
+        else:
+            xx = jnp.concatenate(x_lst, axis=-1)
+            xx = xx.reshape(*x.shape[:-1], -1, x.shape[-1])
+            xx = jnp.einsum("...hd,hdf->...hf", xx, self.kernel)
+            xx = xx.reshape(*x.shape[:-1], -1)
+            xx = jnp.concatenate([xx, x], axis=-1)
         yy = segment_sum(xx, batch, batch_size)
         yy = self.act_out(yy, key=key)
         yy = yy * self.readout_scale + self.readout_bias
@@ -431,11 +557,12 @@ class HeadKernel(eqx.Module):
 # DenseNet: https://arxiv.org/abs/1608.06993
 # AttnRes: https://arxiv.org/abs/2603.15031
 class DuAxMPNN(eqx.Module):
-    """DuAxMPNN for PCQM4Mv2: 19-feature atoms, 6-feature bonds, 8-step RWPE."""
+    """DuAxMPNN for PCQM4Mv2: 10 discrete atom features, multi-hop edges, RWPE12 + electronic node slice."""
     depth: int
     width: int
     num_head: int
     dim_head: int
+    ablation: AblationConfig
 
     # Multi-feature atom encoder: one embedding table per atom feature dimension
     atom_embed: EmbedLayer
@@ -444,31 +571,48 @@ class DuAxMPNN(eqx.Module):
     depth_mix:  tuple
     head: HeadKernel
 
-    def __init__(self, depth, width, num_head, dim_head, key):
+    def __init__(self, depth, width, num_head, dim_head, key, *, ablation: AblationConfig | None = None):
         assert key is not None
-        assert depth >= 2
-        keys = _split_or_none(key, depth * 2 + 3)
+        assert depth >= 1
+        self.ablation = ablation if ablation is not None else AblationConfig()
+        self.ablation.validate()
+
+        n_sub = depth * 2 + 3 if self.ablation.depth_mode == "dense" else depth + 3
+        keys = _split_or_none(key, n_sub)
 
         self.depth = depth
         self.width = width
         self.num_head = num_head
         self.dim_head = dim_head
+        edge_dims = EDGE_DIMS_PER_HOP[: self.ablation.max_hops]
+        head_cross_depth = depth - 1 if self.ablation.depth_mode == "dense" else 0
+
         print(
             f"#model={self.__class__.__name__}, "
             f"depth={self.depth}, width={self.width}, "
-            f"num_head={self.num_head}, dim_head={self.dim_head}"
+            f"num_head={self.num_head}, dim_head={self.dim_head}, "
+            f"ablation(max_hops={self.ablation.max_hops}, depth_mode={self.ablation.depth_mode}, "
+            f"cont_embed={self.ablation.cont_embed}, elec_mode={self.ablation.elec_mode})"
         )
-        
+
         curr = 0
-        self.atom_embed = EmbedLayer(NODE_FEAT_TOTAL_VOCAB, len(NODE_FEAT_VOCAB_SIZES), width, keys[curr]); curr += 1
-        self.atom_pos   = GatedLinearBlock(EMBED_POS, width, num_head, dim_head, 1, key=keys[curr]); curr += 1
-        layer_mix, depth_mix = [], []
+        self.atom_embed = EmbedLayer(NODE_FEAT_TOTAL_VOCAB, len(NODE_FEAT_VOCAB_SIZES), width, keys[curr])
+        curr += 1
+        self.atom_pos = GatedLinearBlock(EMBED_POS, width, num_head, dim_head, 1, key=keys[curr])
+        curr += 1
+        layer_mix: list[LayerMixerKernel] = []
+        depth_mix: list[DepthMixerKernel] = []
         for i in range(depth):
-            layer_mix.append(LayerMixerKernel(width, num_head, dim_head, EDGE_DIMS_PER_HOP, key=keys[curr])); curr += 1
-            depth_mix.append(DepthMixerKernel(i, width, num_head, dim_head, key=keys[curr])); curr += 1
-        self.layer_mix = tuple(layer_mix)  # type: ignore
-        self.depth_mix = tuple(depth_mix)  # type: ignore
-        self.head = HeadKernel(depth - 1, width, num_head, dim_head, key=keys[curr])
+            layer_mix.append(
+                LayerMixerKernel(width, num_head, dim_head, edge_dims, key=keys[curr], ablation=self.ablation)
+            )
+            curr += 1
+            if self.ablation.depth_mode == "dense":
+                depth_mix.append(DepthMixerKernel(i, width, num_head, dim_head, key=keys[curr]))
+                curr += 1
+        self.layer_mix = tuple(layer_mix)
+        self.depth_mix = tuple(depth_mix)
+        self.head = HeadKernel(head_cross_depth, width, num_head, dim_head, key=keys[curr])
 
         print("#params:", _count_params(self))
         print()
@@ -476,45 +620,77 @@ class DuAxMPNN(eqx.Module):
     def __call__(self, batch, training=False, key=None):
         """Forward pass over a padded batch dict produced by the dataloader.
 
-        Expected keys: ``node_feat`` (N_pad, 10), ``node_embd`` (N_pad, 17),
+        Expected keys: ``node_feat`` (N_pad, 10), ``node_embd`` (N_pad, 17+),
         ``edgeX_{feat,index,batch}`` for X in ``{"", "_2hop", "_3hop", "_4hop"}``,
         ``node_batch`` (N_pad,), ``batch_n_graphs`` (scalar); graph index 0 is null.
         """
-        node_feat  = batch['node_feat']      # (N_pad, 10) int32
-        node_embd  = batch['node_embd'][..., :EMBED_POS]      # (N_pad, 12)
-        node_elec  = batch['node_embd'][..., -EMBED_ELEC:]    # (N_pad, 2)
-        graph_id   = batch['node_batch']     # (N_pad,)
-        batch_size = batch['batch_n_graphs'] + 1
-        edges = self._get_edge(batch)
-        keys = _split_or_none(key if training else None, self.depth * 2 + 1)
-        print("#kernel: nodes={}, {}".format(
-            node_feat.shape[0],
-            ", ".join(
-                "{}_edges={}".format(
-                    "1hop" if suffix == "" else suffix[1:],
-                    batch[f"edge{suffix}_index"].shape[1],
-                )
-                for suffix in EDGE_SUFFIXES
-            ),
-        ))
+        batch = dict(batch)
+        if not self.ablation.use_neighbor_rank and "edge_feat" in batch:
+            feat = batch["edge_feat"]
+            neutral = NEUTRAL_ONEHOP_RANK_COL_TOKEN
+            if isinstance(feat, jnp.ndarray):
+                nv = jnp.asarray(neutral, dtype=feat.dtype)
+                batch["edge_feat"] = feat.at[:, NEIGHBOR_RANK_EDGE_COL].set(nv)
+            else:
+                feat_np = np.asarray(feat).copy()
+                feat_np[:, NEIGHBOR_RANK_EDGE_COL] = np.asarray(neutral, dtype=feat_np.dtype)
+                batch["edge_feat"] = feat_np
 
-        x_depth, lst_layer, lst_depth = self.atom_embed(node_feat) + self.atom_pos(node_embd) / 10, [], []
+        node_feat = batch["node_feat"]
+        node_embd = batch["node_embd"][..., :EMBED_POS]
+        node_elec = batch["node_embd"][..., -EMBED_ELEC:]
+        graph_id = batch["node_batch"]
+        batch_size = batch["batch_n_graphs"] + 1
+        edges = self._get_edge(batch)
+
+        if self.ablation.depth_mode == "dense":
+            keys = _split_or_none(key if training else None, self.depth * 2 + 1)
+        else:
+            keys = _split_or_none(key if training else None, self.depth + 1)
+
+        print(
+            "#kernel: nodes={}, {}".format(
+                node_feat.shape[0],
+                ", ".join(
+                    "{}_edges={}".format(
+                        "1hop" if suffix == "" else suffix[1:],
+                        batch[f"edge{suffix}_index"].shape[1],
+                    )
+                    for suffix in EDGE_SUFFIXES[: self.ablation.max_hops]
+                ),
+            )
+        )
+
+        x_depth = self.atom_embed(node_feat) + self.atom_pos(node_embd) / 10
+        lst_layer: list[jax.Array] = []
+        lst_depth: list[jax.Array] = []
         for i in range(self.depth):
-            x_layer = self.layer_mix[i](x_depth, edges, graph_id, batch_size, node_elec, key=keys[i*2])
+            if self.ablation.depth_mode == "dense":
+                k_layer = keys[i * 2]
+                k_depth = keys[i * 2 + 1]
+            else:
+                k_layer = keys[i]
+                k_depth = None
+            x_layer = self.layer_mix[i](x_depth, edges, graph_id, batch_size, node_elec, key=k_layer)
             lst_layer.append(x_layer)
-            x_depth = self.depth_mix[i](x_layer, lst_layer[:-1], key=keys[2*i+1])
+            if self.ablation.depth_mode == "dense":
+                x_depth = self.depth_mix[i](x_layer, lst_layer[:-1], key=k_depth)
+            elif self.ablation.depth_mode == "resnet":
+                x_depth = x_depth + x_layer
+            else:
+                x_depth = x_layer
             lst_depth.append(x_depth)
         y = self.head(x_depth, lst_depth[:-1], graph_id, batch_size, key=keys[-1])[1:]
         return y
 
     def _get_edge(self, batch):
         """Build edge tuples ``(edge_index, edge_attr, degree)`` per hop."""
-        num_nodes = batch['node_feat'].shape[0]
+        num_nodes = batch["node_feat"].shape[0]
         edges = []
-        for suffix in EDGE_SUFFIXES:
-            edge_index = batch[f'edge{suffix}_index']   # (2, E_pad)
-            edge_attr  = batch[f'edge{suffix}_feat']    # (E_pad, num_bond_features)
-            n_edges = batch[f'edge{suffix}_batch'].shape[0]
+        for suffix in EDGE_SUFFIXES[: self.ablation.max_hops]:
+            edge_index = batch[f"edge{suffix}_index"]
+            edge_attr = batch[f"edge{suffix}_feat"]
+            n_edges = batch[f"edge{suffix}_batch"].shape[0]
             deg = segment_sum(
                 jnp.ones((n_edges, 1), dtype=edge_index.dtype),
                 edge_index[1],
@@ -524,7 +700,9 @@ class DuAxMPNN(eqx.Module):
         return edges
 
 
-def get_model(key):
-    """Create the default DuAxMPNN model (depth=5, width=256, heads=16)."""
+def get_model(key, config: AblationConfig | None = None):
+    """Create DuAxMPNN (depth=5, width=256, heads=16). Optional ``config`` selects ablations."""
     assert key is not None
-    return DuAxMPNN(depth=5, width=256, num_head=16, dim_head=16, key=key)
+    cfg = config if config is not None else AblationConfig()
+    cfg.validate()
+    return DuAxMPNN(depth=5, width=256, num_head=16, dim_head=16, key=key, ablation=cfg)

@@ -267,11 +267,14 @@ def _khop_edges(num_nodes, edge_index):
     )
 
 
-def mol_to_graph(smiles_string, removeHs=True, sdf_mol=None):
+def mol_to_graph(smiles_string, sdf_mol=None, *, h_mode="active"):
     """
     Converts SMILES string to graph dictionary.
-    :input: SMILES string (str)
-    :return: graph object
+
+    ``h_mode`` controls which atoms become nodes after ``AddHs``:
+      - ``\"active\"``: heavy atoms + polar H (N/O/S-bonded); default, matches selective H handling.
+      - ``\"all\"``: all atoms including every hydrogen.
+      - ``\"heavy\"``: heavy atoms only (no explicit hydrogens).
     """
     mol = Chem.MolFromSmiles(smiles_string)
     if mol is None:
@@ -283,10 +286,14 @@ def mol_to_graph(smiles_string, removeHs=True, sdf_mol=None):
     except Exception:
         pass
 
-    if removeHs:
+    if h_mode == "active":
         keep_atom = _keep_atom_mask(mol)
-    else:
+    elif h_mode == "all":
         keep_atom = np.ones(mol.GetNumAtoms(), dtype=np.bool_)
+    elif h_mode == "heavy":
+        keep_atom = np.array([a.GetAtomicNum() != 1 for a in mol.GetAtoms()], dtype=np.bool_)
+    else:
+        raise ValueError(f"h_mode must be active|all|heavy, got {h_mode!r}")
 
     keep_idx = np.flatnonzero(keep_atom)
     if len(keep_idx) == 0:

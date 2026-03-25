@@ -33,6 +33,7 @@ if _MODEL_SPEC is None or _MODEL_SPEC.loader is None:
 _MODEL_MODULE = importlib.util.module_from_spec(_MODEL_SPEC)
 _MODEL_SPEC.loader.exec_module(_MODEL_MODULE)  # type: ignore[arg-type]
 
+AblationConfig = _MODEL_MODULE.AblationConfig
 DuAxMPNN = _MODEL_MODULE.DuAxMPNN
 DepthMixerKernel = _MODEL_MODULE.DepthMixerKernel
 DiffEmbedLayer = _MODEL_MODULE.DiffEmbedLayer
@@ -121,6 +122,7 @@ def _dense_gin(
     width: int,
     num_head: int,
     key: jax.Array,
+    ablation: AblationConfig | None = None,
 ) -> DuAxMPNN:
     if width % num_head != 0:
         raise ValueError("width must be divisible by num_head")
@@ -130,6 +132,7 @@ def _dense_gin(
         num_head=num_head,
         dim_head=width // num_head,
         key=key,
+        ablation=ablation,
     )
 
 
@@ -380,10 +383,10 @@ class ModelCompatibilityTest(unittest.TestCase):
             self.assertEqual(out.shape[0], int(batch["batch_n_graphs"]))
             self.assertTrue(np.all(np.isfinite(np.asarray(out))))
 
-    def test_du_ax_mpnn_rejects_depth_below_2(self) -> None:
+    def test_du_ax_mpnn_rejects_depth_below_1(self) -> None:
         with self.assertRaises(AssertionError):
             DuAxMPNN(
-                depth=1,
+                depth=0,
                 width=8,
                 num_head=2,
                 dim_head=4,
@@ -438,6 +441,69 @@ class ModelCompatibilityTest(unittest.TestCase):
         self.assertEqual(out_default.shape, (int(batch["batch_n_graphs"]), 1))
         self.assertTrue(np.all(np.isfinite(np.asarray(out_default))))
         np.testing.assert_allclose(np.asarray(out_default), np.asarray(out_explicit))
+
+    def test_ablation_config_validate(self) -> None:
+        with self.assertRaises(ValueError):
+            AblationConfig(max_hops=0).validate()
+        with self.assertRaises(ValueError):
+            AblationConfig(depth_mode="bad").validate()
+        with self.assertRaises(ValueError):
+            AblationConfig(cont_embed="relu").validate()
+        AblationConfig().validate()
+
+    def test_forward_depth_mode_resnet_and_none(self) -> None:
+        batch = _make_minimal_batch()
+        for mode in ("resnet", "none"):
+            with self.subTest(mode=mode):
+                m = _dense_gin(
+                    depth=2,
+                    width=16,
+                    num_head=2,
+                    key=jax.random.PRNGKey(1),
+                    ablation=AblationConfig(depth_mode=mode),
+                )
+                self.assertEqual(len(m.depth_mix), 0)
+                self.assertEqual(m.head.kernel.shape[0], 0)
+                out = m(batch, training=False, key=None)
+                self.assertEqual(out.shape, (int(batch["batch_n_graphs"]), 1))
+                self.assertTrue(np.all(np.isfinite(np.asarray(out))))
+
+    def test_forward_max_hops_and_cont_embed_variants(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            dataset_root = Path(temp_dir) / "pcqm4m-v2"
+            _make_toy_dataset(dataset_root)
+            dataset = PCQMDataset(dataset_root=dataset_root, split="train", split_file=dataset_root / "split_dict.h5")
+            batch = dataset.batch_collapse([0, 1], pad_to_multiple=4)
+        for ce in ("moact", "linear", "mlp", "binning"):
+            with self.subTest(cont_embed=ce):
+                m = _dense_gin(
+                    depth=1,
+                    width=32,
+                    num_head=2,
+                    key=jax.random.PRNGKey(2),
+                    ablation=AblationConfig(max_hops=1, cont_embed=ce, moact_bases=4),
+                )
+                out = m(batch, training=False, key=None)
+                self.assertEqual(out.shape, (2, 1))
+                self.assertTrue(np.all(np.isfinite(np.asarray(out))))
+
+    def test_forward_no_neighbor_rank_and_per_bond_elec(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            dataset_root = Path(temp_dir) / "pcqm4m-v2"
+            _make_toy_dataset(dataset_root)
+            dataset = PCQMDataset(dataset_root=dataset_root, split="train", split_file=dataset_root / "split_dict.h5")
+            batch = dataset.batch_collapse([0, 1], pad_to_multiple=4)
+        m = _dense_gin(
+            depth=1,
+            width=32,
+            num_head=2,
+            key=jax.random.PRNGKey(3),
+            ablation=AblationConfig(use_neighbor_rank=False, elec_mode="per_bond"),
+        )
+        out = m(batch, training=False, key=None)
+        self.assertEqual(out.shape, (2, 1))
+        self.assertTrue(np.all(np.isfinite(np.asarray(out))))
+
 
 if __name__ == "__main__":
     unittest.main()
