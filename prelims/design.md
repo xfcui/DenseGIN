@@ -51,7 +51,7 @@ table lookup in the model.
 | 9 | Min ring size | 3–8, misc | `MinAtomRingSize` |
 
 Feature 9 (min ring size) captures ring strain and fused-ring topology that
-no other single feature encodes. See `doc/ring_size/README.md`.
+no other single feature encodes. See `prelims/ring_size/README.md`.
 
 ### Continuous features (`node_embd`) — 17 floats per atom
 
@@ -66,7 +66,7 @@ Stored as a single `float16` array, concatenated in the order below.
 
 These four sub-features serve distinct roles:
 
-**RWPE** (`doc/rwpe/README.md`) — encodes graph topology via random-walk
+**RWPE** (`prelims/rwpe/README.md`) — encodes graph topology via random-walk
 return probabilities at walk lengths 1–12. Uses a lazy random walk (A + I) to
 avoid bipartite oscillation. Dimensions beyond 12 show diminishing variance on
 drug-like molecules (median diameter ~10–14).
@@ -74,12 +74,12 @@ drug-like molecules (median diameter ~10–14).
 **3D coordinates** — centroid-subtracted Cartesian positions from the training
 SDF. Zero-filled when no conformer is available (test set).
 
-**Electronegativity** (`doc/electronegativity.md`) — the intrinsic tendency of
+**Electronegativity** (`prelims/electronegativity.md`) — the intrinsic tendency of
 an atom to attract electrons. Carbon-centering maps the most common element to
 0.0. A non-monotonic function of Z that would otherwise need to be memorised
 from the periodic table.
 
-**Gasteiger charge** (`doc/gasteiger_charge.md`) — context-dependent partial
+**Gasteiger charge** (`prelims/gasteiger_charge.md`) — context-dependent partial
 charge from iterative electronegativity equilibration. In principle derivable
 from EN via multi-hop message passing, but providing it explicitly gives
 shallow models access to pre-computed electronic information. NaN/outlier
@@ -98,9 +98,9 @@ guarded (`|gc| > 4` → 0).
 | 2 | Conjugated | False, True | `GetIsConjugated` |
 | 3 | Rotatable | False, True | `_is_rotatable` |
 | 4 | Min ring size | 3–8, misc | `MinBondRingSize` |
-| 5 | Neighbor rank | 0–6, misc | position of destination in source’s sorted neighbors | `doc/neighbor_rank/README.md` |
+| 5 | Neighbor rank | 0–6, misc | position of destination in source’s sorted neighbors | `prelims/neighbor_rank.md` |
 
-**Rotatable bonds** (`doc/rot_bond/README.md`) — uses RDKit's strict SMARTS
+**Rotatable bonds** (`prelims/rot_bond/README.md`) — uses RDKit's strict SMARTS
 definition, which excludes partial-double-bond single bonds (amide C–N, ester
 C–O). ~12% of bonds are rotatable on average.
 
@@ -214,10 +214,10 @@ alternative if the model struggles to disentangle the streams.
 
 ## Activation Layer
 
-MoTanh (`doc/mix_tanh/README.md`) provides a learnable, bounded, monotone activation for
+MoTanh (`prelims/mix_tanh/README.md`) provides a learnable, bounded, monotone activation for
 embedding continuous scalars into (−1, 1). It is a weighted sum of `tanh(s_i · x)`
 with softplus-normalised mixing weights and softplus-positive scales. See
-`doc/mix_tanh/README.md` for properties and expressivity analysis.
+`prelims/mix_tanh/README.md` for properties and expressivity analysis.
 
 Potential use: apply MoTanh as the nonlinearity inside the continuous-feature
 MLPs above, replacing GELU/ReLU where a bounded, order-preserving embedding is

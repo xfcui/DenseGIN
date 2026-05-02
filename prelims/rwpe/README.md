@@ -50,12 +50,12 @@ transition[nonzero_degree] = adjacency[nonzero_degree] / degree[nonzero_degree, 
 | File | Role |
 |---|---|
 | `src/dataset.py` | Computes RWPE during graph preprocessing (`_compute_rwpe`). |
-| `doc/rwpe/plot_rwpe_distribution.py` | Samples molecules from raw SMILES, computes RWPE on-the-fly, and plots per-dimension distributions and `dim k − dim k−2` difference histograms. |
+| `prelims/rwpe/plot_rwpe_distribution.py` | Samples molecules from raw SMILES, computes RWPE on-the-fly, and plots per-dimension distributions and `dim k − dim k−2` difference histograms. |
 
 ## Usage
 
 ```bash
-python doc/rwpe/plot_rwpe_distribution.py
+python prelims/rwpe/plot_rwpe_distribution.py
 ```
 
 Key options:
@@ -67,4 +67,4 @@ Key options:
 | `--dim` | `64` | RWPE dimensions to plot |
 | `--bins` | `80` | Histogram bins per panel |
 | `--seed` | `0` | Random seed |
-| `--out` | `doc/rwpe/rwpe_distribution.png` | Output image (relative paths resolve to script dir) |
+| `--out` | `prelims/rwpe/rwpe_distribution.png` | Output image (relative paths resolve to script dir) |

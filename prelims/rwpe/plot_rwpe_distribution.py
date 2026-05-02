@@ -8,8 +8,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-DOC_DIR = osp.dirname(osp.abspath(__file__))
-PROJECT_ROOT = osp.abspath(osp.join(DOC_DIR, "..", ".."))
+SCRIPT_DIR = osp.dirname(osp.abspath(__file__))
+PROJECT_ROOT = osp.abspath(osp.join(SCRIPT_DIR, "..", ".."))
 SRC_DIR = osp.join(PROJECT_ROOT, "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
@@ -54,7 +54,7 @@ def parse_args():
     parser.add_argument(
         "--out",
         type=str,
-        default=osp.join(DOC_DIR, "rwpe_distribution.png"),
+        default=osp.join(SCRIPT_DIR, "rwpe_distribution.png"),
         help="Output image path.",
     )
     args = parser.parse_args()
@@ -171,7 +171,7 @@ def main():
     )
     rwpe_sampled, used_molecules = sample_rwpe_from_smiles(smiles_samples, dim=args.dim)
 
-    out_path = args.out if osp.isabs(args.out) else osp.join(DOC_DIR, args.out)
+    out_path = args.out if osp.isabs(args.out) else osp.join(SCRIPT_DIR, args.out)
     out_dir = osp.dirname(out_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)

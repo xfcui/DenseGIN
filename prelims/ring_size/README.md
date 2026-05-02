@@ -95,5 +95,5 @@ Key statistics on 10,000 random PCQM4Mv2 molecules:
 Run the script from the project root:
 
 ```bash
-python doc/ring_size/plot_ring_size_distribution.py
+python prelims/ring_size/plot_ring_size_distribution.py
 ```

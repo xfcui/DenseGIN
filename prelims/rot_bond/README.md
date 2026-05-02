@@ -135,5 +135,5 @@ Marginal distributions are shown on the top and right axes.
 | File | Role |
 |---|---|
 | `src/dataset.py` | `_ROTATABLE_BOND_SMARTS`, `_rotatable_bond_indices`, `bond_to_feature_vector`; rotatable flag applied per-bond in `smiles2graph`. |
-| `doc/rot_bond/plot_rot_bond_distribution.py` | Samples 10 000 raw-SMILES molecules, counts rotatable and non-rotatable bonds, and writes the SVG plot next to this file. |
-| `doc/rot_bond/rot_bond_joint_10k.svg` | Joint distribution: rotatable bonds vs non-rotatable bonds. |
+| `prelims/rot_bond/plot_rot_bond_distribution.py` | Samples 10 000 raw-SMILES molecules, counts rotatable and non-rotatable bonds, and writes the SVG plot next to this file. |
+| `prelims/rot_bond/rot_bond_joint_10k.svg` | Joint distribution: rotatable bonds vs non-rotatable bonds. |

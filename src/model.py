@@ -232,7 +232,7 @@ class GatedLinearBlock(eqx.Module):
         return xx
 
 
-# Mixture of Activation — generalised from doc/mix_tanh/README.md
+# Mixture of Activation — generalised from prelims/mix_tanh/README.md
 _MOA_ACTS = {"tanh": jnp.tanh, "sigmoid": jax.nn.sigmoid, "softplus": jax.nn.softplus}
 
 class MoAct(eqx.Module):

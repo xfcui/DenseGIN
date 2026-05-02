@@ -114,6 +114,6 @@ top and right axes.
 | File | Role |
 |---|---|
 | `src/dataset.py` | `_is_active_hydrogen`, `_active_hydrogen_mask`, `_non_active_hydrogen_count`; mask applied in `smiles2graph`. |
-| `doc/act_h/plot_active_h_distribution.py` | Samples 10 000 raw-SMILES molecules, counts all four H/heavy-atom quantities, and writes both SVG plots next to this file. |
-| `doc/act_h/active_non_active_h_joint_10k.svg` | Joint distribution: active H vs non-active H. |
-| `doc/act_h/active_non_active_h_joint_10k_total_h_vs_heavy.svg` | Joint distribution: total H vs heavy atoms. |
+| `prelims/act_h_atom/plot_active_h_distribution.py` | Samples 10 000 raw-SMILES molecules, counts all four H/heavy-atom quantities, and writes both SVG plots next to this file. |
+| `prelims/act_h_atom/active_non_active_h_joint_10k.svg` | Joint distribution: active H vs non-active H. |
+| `prelims/act_h_atom/active_non_active_h_joint_10k_total_h_vs_heavy.svg` | Joint distribution: total H vs heavy atoms. |

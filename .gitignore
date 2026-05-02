@@ -1,7 +1,6 @@
 # Private
-/article/
-/bin/
 /backup/
+/bin/
 
 # Data and experiment artifacts
 /dataset/

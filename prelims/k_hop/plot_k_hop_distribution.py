@@ -77,7 +77,7 @@ def parse_args():
         type=str,
         default="k_hop_10k",
         help=(
-            "Base output stem or directory (relative to doc/k_hop). "
+            "Base output stem or directory (relative to prelims/k_hop). "
             "Default produces filenames like "
             "`k_hop_2hop_vs_heavy_10k.svg` and "
             "`k_hop_feat_distribution_10k.png`."

@@ -44,7 +44,7 @@ Both plots are computed from random SMILES sampled from the raw PCQM4Mv2 CSV.
 
 ## Files generated
 
-From the default run (10000 molecules), the script writes files under `doc/k_hop/`:
+From the default run (10000 molecules), the script writes files under `prelims/k_hop/`:
 
 - `k_hop_2hop_vs_heavy_10k.svg`
 - `k_hop_3hop_vs_heavy_10k.svg`
@@ -54,7 +54,7 @@ From the default run (10000 molecules), the script writes files under `doc/k_hop
 ## Run
 
 ```bash
-python doc/k_hop/plot_k_hop_distribution.py
+python prelims/k_hop/plot_k_hop_distribution.py
 ```
 
 Optional flags:
@@ -62,4 +62,4 @@ Optional flags:
 - `--num-molecules`
 - `--seed`
 - `--raw-csv-path`
-- `--out` (base output stem; default writes to `doc/k_hop` with names above)
+- `--out` (base output stem; default writes to `prelims/k_hop` with names above)

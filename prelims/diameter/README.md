@@ -52,7 +52,7 @@ The output is:
 Run:
 
 ```bash
-python doc/diameter/plot_diameter_distribution.py
+python prelims/diameter/plot_diameter_distribution.py
 ```
 
 You can change sample size and seed via `--num-molecules` and `--seed`, or choose
@@ -64,6 +64,6 @@ a different output name with `--out`.
 
 | File | Role |
 |---|---|
-| `doc/diameter/plot_diameter_distribution.py` | Computes diameter on the default graph and writes the SVG output in `doc/diameter/`. |
-| `doc/diameter/diameter_vs_heavy_10k.svg` | Generated joint bubble plot (diameter vs node count). |
-| `doc/diameter/README.md` | Explains the graph diameter definition and the plotting setup. |
+| `prelims/diameter/plot_diameter_distribution.py` | Computes diameter on the default graph and writes the SVG output in `prelims/diameter/`. |
+| `prelims/diameter/diameter_vs_heavy_10k.svg` | Generated joint bubble plot (diameter vs node count). |
+| `prelims/diameter/README.md` | Explains the graph diameter definition and the plotting setup. |

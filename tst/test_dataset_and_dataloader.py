@@ -26,6 +26,8 @@ PCQMDataset = _MODULE.PCQMDataset
 PCQMDataloader = _MODULE.PCQMDataloader
 batch_collapse = _MODULE.batch_collapse
 
+from src.dataset.hdf5 import load_graphs, save_graphs
+
 
 def _build_toy_dataset(root: Path) -> Dict[str, np.ndarray]:
     """Write a small synthetic PCQM-style HDF5 dataset and return raw source blocks."""
@@ -168,6 +170,132 @@ class PCQMDatasetTestCase(unittest.TestCase):
         finally:
             ds2.close()
             alt.unlink(missing_ok=True)
+
+    def test_split_indices_filter_invalid_labels(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            dataset_root = Path(temp_dir) / "pcqm4m-v2"
+            _build_toy_dataset(dataset_root)
+            with h5py.File(dataset_root / "processed" / "data_processed.h5", "r+") as f:
+                f["labels"][2] = -1.0
+
+            train_ds = PCQMDataset(
+                dataset_root=dataset_root,
+                split="train",
+                split_file=dataset_root / "split_dict.h5",
+            )
+            all_ds = PCQMDataset(
+                dataset_root=dataset_root,
+                split=None,
+                split_file=dataset_root / "split_dict.h5",
+            )
+            try:
+                np.testing.assert_array_equal(
+                    train_ds.get_split_indices(),
+                    np.array([0], dtype=np.int64),
+                )
+                np.testing.assert_array_equal(
+                    all_ds.get_split_indices(),
+                    np.array([0, 1], dtype=np.int64),
+                )
+            finally:
+                train_ds.close()
+                all_ds.close()
+
+    def test_disk_backed_dataset_matches_in_memory_batch_contract(self) -> None:
+        disk_ds = PCQMDataset(
+            dataset_root=self.dataset_root,
+            split=None,
+            split_file=self.dataset_root / "split_dict.h5",
+            load_in_memory=False,
+        )
+        try:
+            mem_batch = self.dataset.batch_collapse([0, 2], pad_to_multiple=4)
+            disk_batch = disk_ds.batch_collapse([0, 2], pad_to_multiple=4)
+
+            self.assertIsNotNone(disk_ds.h5_file)
+            self.assertFalse(disk_ds._load_in_memory)
+            for key in mem_batch:
+                np.testing.assert_array_equal(disk_batch[key], mem_batch[key])
+            self.assertEqual(disk_batch["node_feat"].dtype, np.int32)
+            self.assertEqual(disk_batch["node_embd"].dtype, np.float32)
+            self.assertEqual(disk_batch["edge_index"].dtype, np.int32)
+        finally:
+            disk_ds.close()
+
+    def test_save_and_load_graphs_round_trip_compact_to_standard_dtypes(self) -> None:
+        graph = {
+            "node_feat": np.arange(20, dtype=np.uint8).reshape(2, 10),
+            "node_embd": np.arange(34, dtype=np.float32).reshape(2, 17),
+            "edge_index": np.array([[0, 1], [1, 0]], dtype=np.int32),
+            "edge_feat": np.array([[0, 1, 2, 3, 4, 0], [1, 0, 1, 0, 1, 2]], dtype=np.uint8),
+            "edge_index_2hop": np.array([[0], [1]], dtype=np.int32),
+            "edge_feat_2hop": np.array([[1, 2]], dtype=np.uint8),
+            "edge_index_3hop": np.array([[0], [1]], dtype=np.int32),
+            "edge_feat_3hop": np.array([[1, 2, 3]], dtype=np.uint8),
+            "edge_index_4hop": np.array([[0], [1]], dtype=np.int32),
+            "edge_feat_4hop": np.array([[1, 2, 3, 4]], dtype=np.uint8),
+        }
+        empty_graph = {
+            "node_feat": np.zeros((0, 10), dtype=np.uint8),
+            "node_embd": np.zeros((0, 17), dtype=np.float32),
+            "edge_index": np.zeros((2, 0), dtype=np.int32),
+            "edge_feat": np.zeros((0, 6), dtype=np.uint8),
+            "edge_index_2hop": np.zeros((2, 0), dtype=np.int32),
+            "edge_feat_2hop": np.zeros((0, 2), dtype=np.uint8),
+            "edge_index_3hop": np.zeros((2, 0), dtype=np.int32),
+            "edge_feat_3hop": np.zeros((0, 3), dtype=np.uint8),
+            "edge_index_4hop": np.zeros((2, 0), dtype=np.int32),
+            "edge_feat_4hop": np.zeros((0, 4), dtype=np.uint8),
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            out_path = Path(temp_dir) / "processed" / "data_processed.h5"
+            labels = np.array([1.25, -1.0], dtype=np.float32)
+            save_graphs(str(out_path), [graph, empty_graph], labels)
+
+            with h5py.File(out_path, "r") as f:
+                self.assertEqual(f["node_feat"].dtype, np.dtype("uint8"))
+                self.assertEqual(f["node_embd"].dtype, np.dtype("float16"))
+                self.assertEqual(f["edge_feat"].dtype, np.dtype("uint8"))
+                self.assertEqual(f["node_ptr"].dtype, np.dtype("int32"))
+
+            loaded = load_graphs(str(out_path))
+
+        (
+            loaded_labels,
+            node_feat,
+            node_embd,
+            edge_feat,
+            edge_index,
+            node_ptr,
+            edge_ptr,
+            edge_index_2hop,
+            edge_feat_2hop,
+            edge_ptr_2hop,
+            edge_index_3hop,
+            edge_feat_3hop,
+            edge_ptr_3hop,
+            edge_index_4hop,
+            edge_feat_4hop,
+            edge_ptr_4hop,
+        ) = loaded
+
+        np.testing.assert_allclose(loaded_labels, labels)
+        self.assertEqual(node_feat.dtype, np.int32)
+        self.assertEqual(node_embd.dtype, np.float32)
+        self.assertEqual(edge_feat.dtype, np.int32)
+        self.assertEqual(edge_index.dtype, np.int32)
+        np.testing.assert_array_equal(node_ptr, np.array([0, 2, 2], dtype=np.int32))
+        np.testing.assert_array_equal(edge_ptr, np.array([0, 2, 2], dtype=np.int32))
+        np.testing.assert_array_equal(edge_ptr_2hop, np.array([0, 1, 1], dtype=np.int32))
+        np.testing.assert_array_equal(edge_ptr_3hop, np.array([0, 1, 1], dtype=np.int32))
+        np.testing.assert_array_equal(edge_ptr_4hop, np.array([0, 1, 1], dtype=np.int32))
+        self.assertEqual(edge_index_2hop.dtype, np.int32)
+        self.assertEqual(edge_feat_2hop.dtype, np.int32)
+        self.assertEqual(edge_index_3hop.dtype, np.int32)
+        self.assertEqual(edge_feat_3hop.dtype, np.int32)
+        self.assertEqual(edge_index_4hop.dtype, np.int32)
+        self.assertEqual(edge_feat_4hop.dtype, np.int32)
 
     def test_batch_collapse_dynamic_null_and_offsets(self) -> None:
         batch = self.dataset.batch_collapse([0, 2], pad_to_multiple=4)
