@@ -1,14 +1,15 @@
-# PCQM4Mv2 HOMO-LUMO Gap Prediction
+# DuAxMPNN
 
-JAX/Equinox/Optax pipeline for predicting HOMO-LUMO gaps on the
+DuAxMPNN is a JAX/Equinox/Optax toolkit for training a dual-axis
+message-passing neural network on the
 [PCQM4Mv2](https://ogb.stanford.edu/docs/lsc/pcqm4mv2/) molecular graph
-benchmark. The target is measured in eV and evaluated with MAE.
+benchmark. It predicts HOMO-LUMO gaps in eV and reports validation MAE.
 
-The repository contains:
+What DuAxMPNN includes:
 
 - `src.dataset.dataprocess`: raw SMILES plus optional SDF coordinates -> HDF5 graph tensors.
 - `src.dataset`: cached HDF5 dataset loading and padded collapsed graph batching.
-- `src.model`: `DuAxMPNN`, an Equinox message-passing model with multi-hop edges.
+- `src.model`: the `DuAxMPNN` architecture with multi-hop edge mixing and dense depth mixing.
 - `src.train`: training loop, validation loop, Adan optimizer setup, and LR scheduling.
 
 ## Quick Start
@@ -23,7 +24,7 @@ python -m pip install pandas
 # Build processed graph tensors.
 python -m src.dataset.dataprocess --h-mode active
 
-# Train and save the best validation checkpoint.
+# Train DuAxMPNN and save the best validation checkpoint.
 python -m src.train --model_save_path results/best_model.eqx
 
 # Run smoke/regression tests.
@@ -112,14 +113,16 @@ a neutral token.
 ## Model
 
 `get_model()` creates `DuAxMPNN(depth=5, width=256, num_head=16, dim_head=16)`.
-The forward pass consumes batches produced by `PCQMDataloader`.
+The architecture mixes two information axes: bond-aware multi-hop message
+passing within each layer, and dense cross-depth aggregation across layers. The
+forward pass consumes batches produced by `PCQMDataloader`.
 
 Key components:
 
 - `EmbedLayer` embeds 10 discrete atom features with vocabulary offsets applied by the dataset.
 - `GatedLinearBlock` projects RWPE positional features and performs gated MLP-style mixing.
 - `LayerMixerKernel` combines 1-hop through `max_hops` bond-aware convolutions with virtual-node context.
-- `DepthMixerKernel` optionally performs dense cross-layer aggregation.
+- `DepthMixerKernel` performs the dense depth-axis aggregation used by the default model.
 - `HeadKernel` sum-pools graph nodes, drops the null graph, and predicts one scalar gap per molecule.
 
 The training loss is MAE between predicted and target HOMO-LUMO gaps.
