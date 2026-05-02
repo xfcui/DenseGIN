@@ -1,6 +1,7 @@
 # Private
 /article/
 /bin/
+/backup/
 
 # Data and experiment artifacts
 /dataset/
@@ -12,6 +13,7 @@
 *.pt
 *.pth
 *.onnx
+*.tgz
 
 # Logs and notebooks
 *.log
